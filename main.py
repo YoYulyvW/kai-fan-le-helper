@@ -18,11 +18,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide2.QtCore import Qt, QTimer, QThread, Signal, Slot
 from PySide2.QtGui import (
-    QIcon, QAction, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient
+    QIcon, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient
 )
 from PySide2.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
-    QSystemTrayIcon, QMenu
+    QSystemTrayIcon, QMenu, QAction
 )
 
 # ============================================================
