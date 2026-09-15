@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-开饭了助手 - Windows 置顶工具
+开饭了助手 - Windows 置顶工具（精简版）
 - 自动读取剪贴板
 - 发现局域网内运行"开饭了"的手机
 - 发送剧名到手机 /submit
@@ -22,7 +22,7 @@ from PySide2.QtGui import (
 )
 from PySide2.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
-    QSystemTrayIcon, QMenu, QAction
+    QSystemTrayIcon, QMenu, QAction, QLineEdit
 )
 
 # ============================================================
@@ -35,6 +35,10 @@ SCAN_INTERVAL = 30
 HEARTBEAT_INTERVAL = 15
 CLIPBOARD_DEBOUNCE = 400
 SEND_TIMEOUT = 15
+
+# 窗口尺寸
+WIN_WIDTH = 360
+WIN_HEIGHT = 44
 
 # ============================================================
 # 剧名解析
@@ -71,21 +75,15 @@ CUT_TOKENS = [
 class TitleParser:
     @staticmethod
     def parse(text):
-        """从分享文本提取剧名，返回 (title, is_fast)"""
         if not text:
             return None, False
 
         s = text.strip()
         s = s.replace('＃', '#').replace('：', ':')
-
-        # 去 URL
         s = re.sub(r'https?://\S+', '', s, flags=re.IGNORECASE)
-        # 去 【...】
         s = re.sub(r'【[^】]*】', ' ', s)
-        # 去前缀
         for p in PREFIX_TOKENS:
             s = s.replace(p, ' ')
-        # 去开头数字
         s = s.strip()
         s = re.sub(r'^[\d.]+\s+', '', s)
         s = s.strip()
@@ -101,7 +99,6 @@ class TitleParser:
         if not title:
             return None, False
 
-        # 检测"极速"后缀
         is_fast = False
         m = re.search(r'\s*[-~－\u2010-\u2015]\s*极速\s*$', title)
         if m:
@@ -186,7 +183,6 @@ def get_local_ip():
 
 
 def check_ip(ip, port=PORT, timeout=SCAN_TIMEOUT):
-    """检查单个 IP 是否有开饭了服务"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -204,7 +200,6 @@ def check_ip(ip, port=PORT, timeout=SCAN_TIMEOUT):
 
 
 def scan_network(port=PORT):
-    """扫描网段，返回找到的 IP 列表"""
     local_ip = get_local_ip()
     if not local_ip:
         return []
@@ -223,12 +218,10 @@ def scan_network(port=PORT):
 
 
 def ping_phone(ip, port=PORT, timeout=2):
-    """快速 ping 已知 IP"""
     return check_ip(ip, port, timeout) is not None
 
 
 def send_to_phone(ip, text, port=PORT, timeout=SEND_TIMEOUT):
-    """发送到手机 /submit"""
     url = f"http://{ip}:{port}/submit"
     body = json.dumps({"text": text}, ensure_ascii=False).encode('utf-8')
     req = urllib.request.Request(url, data=body, method='POST')
@@ -295,7 +288,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("开饭了助手")
-        self.setFixedSize(480, 76)
+        self.setFixedSize(WIN_WIDTH, WIN_HEIGHT)
         self.setWindowFlags(
             Qt.WindowStaysOnTopHint |
             Qt.FramelessWindowHint |
@@ -305,9 +298,6 @@ class MainWindow(QWidget):
         self.setWindowIcon(create_icon())
 
         self.device_ip = None
-        self.current_text = ""
-        self.current_title = None
-        self.auto_send = False
         self.last_clipboard = ""
         self._drag_pos = None
         self._discovering = False
@@ -328,27 +318,43 @@ class MainWindow(QWidget):
         container.setStyleSheet("""
             #container {
                 background: rgba(28, 28, 30, 0.96);
-                border-radius: 14px;
+                border-radius: 12px;
                 border: 1px solid rgba(255, 255, 255, 0.12);
             }
             QLabel { background: transparent; }
             QPushButton { outline: none; }
+            QLineEdit {
+                background: rgba(255, 255, 255, 0.08);
+                border: none;
+                border-radius: 8px;
+                color: #FFFFFF;
+                font-size: 13px;
+                padding: 0 10px;
+                selection-background-color: #6366F1;
+            }
+            QLineEdit:focus {
+                background: rgba(255, 255, 255, 0.12);
+            }
         """)
-        container.setGeometry(0, 0, 480, 76)
+        container.setGeometry(0, 0, WIN_WIDTH, WIN_HEIGHT)
         self.container = container
 
-        # 第一行
+        # 状态点
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #FF9500; font-size: 12px;")
-        self.status_dot.setFixedWidth(18)
+        self.status_dot.setStyleSheet("color: #FF9500; font-size: 11px;")
+        self.status_dot.setFixedWidth(14)
         self.status_dot.setAlignment(Qt.AlignCenter)
 
-        self.device_label = QLabel("正在扫描局域网...")
-        self.device_label.setStyleSheet(
-            "color: #FFFFFF; font-size: 12px; font-weight: 500;")
+        # 输入框（能显示约 15 个汉字）
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("等待剪贴板...")
+        self.input.setFixedHeight(30)
+        self.input.setMinimumWidth(150)
+        self.input.returnPressed.connect(self.on_send)
 
+        # 发送按钮
         self.send_btn = QPushButton("发送")
-        self.send_btn.setFixedSize(52, 28)
+        self.send_btn.setFixedSize(48, 30)
         self.send_btn.setStyleSheet("""
             QPushButton {
                 background: #34C759; color: white;
@@ -362,13 +368,14 @@ class MainWindow(QWidget):
         self.send_btn.clicked.connect(self.on_send)
         self.send_btn.setEnabled(False)
 
+        # 关闭按钮
         self.close_btn = QPushButton("✕")
-        self.close_btn.setFixedSize(28, 28)
+        self.close_btn.setFixedSize(22, 22)
         self.close_btn.setStyleSheet("""
             QPushButton {
                 background: transparent; color: #8E8E93;
-                border: none; border-radius: 8px;
-                font-size: 13px; font-weight: 600;
+                border: none; border-radius: 6px;
+                font-size: 11px; font-weight: 600;
             }
             QPushButton:hover {
                 background: rgba(255, 255, 255, 0.1); color: #FFFFFF;
@@ -376,26 +383,14 @@ class MainWindow(QWidget):
         """)
         self.close_btn.clicked.connect(self.hide)
 
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(6)
-        top_row.addWidget(self.status_dot)
-        top_row.addWidget(self.device_label, 1)
-        top_row.addWidget(self.send_btn)
-        top_row.addWidget(self.close_btn)
-
-        # 第二行
-        self.title_label = QLabel("等待剪贴板...")
-        self.title_label.setStyleSheet(
-            "color: #8E8E93; font-size: 15px; font-weight: 500;")
-        self.title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        main = QVBoxLayout()
-        main.setContentsMargins(14, 8, 10, 8)
-        main.setSpacing(2)
-        main.addLayout(top_row)
-        main.addWidget(self.title_label)
-        container.setLayout(main)
+        row = QHBoxLayout()
+        row.setContentsMargins(8, 7, 6, 7)
+        row.setSpacing(5)
+        row.addWidget(self.status_dot)
+        row.addWidget(self.input, 1)   # 输入框弹性拉伸
+        row.addWidget(self.send_btn)
+        row.addWidget(self.close_btn)
+        container.setLayout(row)
 
     def position_top_right(self):
         screen = QApplication.primaryScreen().availableGeometry()
@@ -404,6 +399,7 @@ class MainWindow(QWidget):
         self.move(x, y)
 
     # ---------- 拖动 ----------
+    # 只有状态点区域和边距可以拖动（输入框和按钮会拦截鼠标事件）
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
@@ -436,26 +432,13 @@ class MainWindow(QWidget):
         if not text or text == self.last_clipboard:
             return
         self.last_clipboard = text
-        self.current_text = text
 
         title, is_fast = TitleParser.parse(text)
         if title:
-            self.current_title = title
             display = title + (" - 极速" if is_fast else "")
-            self.title_label.setText(display)
-            self.title_label.setStyleSheet(
-                "color: #FFFFFF; font-size: 15px; font-weight: 600;")
+            self.input.setText(display)
             self.send_btn.setEnabled(self.device_ip is not None)
-
-            if self.auto_send and self.device_ip:
-                self.on_send()
-        else:
-            self.current_title = None
-            preview = text.replace('\n', ' ')[:30]
-            self.title_label.setText(f"未能提取剧名：{preview}")
-            self.title_label.setStyleSheet(
-                "color: #FF9500; font-size: 13px; font-weight: 400;")
-            self.send_btn.setEnabled(False)
+        # 提取失败就不覆盖输入框（保留用户手动输入的内容）
 
     # ---------- 托盘 ----------
     def setup_tray(self):
@@ -515,6 +498,7 @@ class MainWindow(QWidget):
     def on_heartbeat(self):
         if not self.device_ip:
             return
+
         def do_ping():
             ok = ping_phone(self.device_ip)
             if not ok:
@@ -525,7 +509,7 @@ class MainWindow(QWidget):
         if not self.device_ip:
             return
         self.device_ip = None
-        self.set_status("未找到手机", "#FF3B30")
+        self.set_status_color("#FF3B30")
         self.send_btn.setEnabled(False)
         QTimer.singleShot(1000, self.start_discovery)
 
@@ -539,7 +523,7 @@ class MainWindow(QWidget):
         if self._discovering:
             return
         self._discovering = True
-        self.set_status("正在扫描局域网...", "#FF9500")
+        self.set_status_color("#FF9500")
         self.send_btn.setEnabled(False)
 
         self._worker = DiscoveryWorker(PORT)
@@ -551,31 +535,29 @@ class MainWindow(QWidget):
         self._discovering = False
         if ips:
             self.device_ip = ips[0]
-            self.set_status(f"已连接 {self.device_ip}", "#34C759")
-            if self.current_title:
+            self.set_status_color("#34C759")
+            if self.input.text().strip():
                 self.send_btn.setEnabled(True)
         else:
             self.device_ip = None
-            self.set_status("未找到手机", "#FF3B30")
+            self.set_status_color("#FF3B30")
             self.send_btn.setEnabled(False)
 
-    def set_status(self, text, color):
-        self.status_dot.setStyleSheet(f"color: {color}; font-size: 12px;")
-        self.device_label.setText(text)
+    def set_status_color(self, color):
+        self.status_dot.setStyleSheet(f"color: {color}; font-size: 11px;")
 
     # ---------- 发送 ----------
     def on_send(self):
+        text = self.input.text().strip()
+        if not text:
+            self.flash_status("#FF9500")
+            return
         if not self.device_ip:
-            self.flash_status("手机未连接", "#FF3B30")
+            self.flash_status("#FF3B30")
             return
-        if not self.current_title:
-            self.flash_status("未提取到剧名", "#FF9500")
-            return
-
-        text_to_send = self.current_text
 
         def do_send():
-            result = send_to_phone(self.device_ip, text_to_send)
+            result = send_to_phone(self.device_ip, text)
             QTimer.singleShot(0, lambda: self._on_send_result(result))
 
         self.send_btn.setEnabled(False)
@@ -587,29 +569,19 @@ class MainWindow(QWidget):
         self.send_btn.setText("发送")
 
         if result.get("ok"):
-            self.flash_status("✅ 已发送", "#34C759")
-            def clear():
-                self.title_label.setText("等待剪贴板...")
-                self.title_label.setStyleSheet(
-                    "color: #8E8E93; font-size: 15px; font-weight: 500;")
-            QTimer.singleShot(1500, clear)
-            self.current_title = None
-            self.current_text = ""
+            self.flash_status("#34C759")
+            self.input.clear()
         else:
-            msg = result.get("message", "未知错误")
-            self.flash_status(f"❌ {msg}", "#FF3B30")
+            self.flash_status("#FF3B30")
 
-    def flash_status(self, text, color):
-        self.status_dot.setStyleSheet(f"color: {color}; font-size: 12px;")
-        self.device_label.setText(text)
+    def flash_status(self, color):
+        self.set_status_color(color)
 
         def restore():
             if self.device_ip:
-                self.status_dot.setStyleSheet("color: #34C759; font-size: 12px;")
-                self.device_label.setText(f"已连接 {self.device_ip}")
+                self.set_status_color("#34C759")
             else:
-                self.status_dot.setStyleSheet("color: #FF3B30; font-size: 12px;")
-                self.device_label.setText("未找到手机")
+                self.set_status_color("#FF3B30")
 
         QTimer.singleShot(2000, restore)
 
