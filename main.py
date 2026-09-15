@@ -3,7 +3,7 @@
 """
 开饭了助手 - Windows 置顶工具
 - 自动读取剪贴板
-- 发现局域网内运行"开饭了"的手机（显示设备名）
+- 发现局域网内运行"开饭了"的手机（显示具体型号）
 - 发送剧名到手机 /submit
 - 历史记录（本地 JSON 保存）
 """
@@ -34,15 +34,16 @@ from PySide2.QtWidgets import (
 PORT = 8848
 SCAN_TIMEOUT = 0.4
 SCAN_MAX_WORKERS = 100
-SCAN_INTERVAL = 30
+SCAN_INTERVAL = 8          # ✅ 从 30 秒改成 8 秒，失败后快速重试
+SCAN_HARD_TIMEOUT = 20     # ✅ 扫描超过 20 秒强制重置（秒）
 HEARTBEAT_INTERVAL = 15
 CLIPBOARD_DEBOUNCE = 400
-SEND_TIMEOUT = 8          # 单次请求超时
-SEND_FALLBACK_MS = 12000  # 兜底恢复按钮时间（毫秒）
-MAX_HISTORY = 50          # 最多保存 50 条历史
+SEND_TIMEOUT = 8
+SEND_FALLBACK_MS = 12000
+MAX_HISTORY = 50
 
 # 窗口尺寸
-WIN_WIDTH = 500
+WIN_WIDTH = 560
 WIN_HEIGHT = 44
 
 # 历史记录文件
@@ -196,7 +197,6 @@ class History:
             pass
 
     def add(self, text, title):
-        # 去重（同 title 只保留最新的）
         self.items = [it for it in self.items if it.get("title") != title]
         self.items.insert(0, {
             "text": text,
@@ -232,22 +232,20 @@ def check_ip(ip, port=PORT, timeout=SCAN_TIMEOUT):
         s.settimeout(timeout)
         s.connect((ip, port))
         s.sendall(b"GET /ping HTTP/1.0\r\nHost: " + ip.encode() + b"\r\n\r\n")
-        data = s.recv(2048)
+        data = s.recv(4096)
         s.close()
 
         if b'"ok"' not in data and b'200 OK' not in data:
             return None
 
         device_name = "开饭了"
-        # 尝试解析 JSON body
         if b'\r\n\r\n' in data:
             try:
                 body = data.split(b'\r\n\r\n', 1)[1]
                 info = json.loads(body.decode('utf-8', errors='ignore'))
-                device_name = info.get("device", "开饭了")
+                device_name = info.get("device") or info.get("model") or "开饭了"
             except Exception:
                 pass
-
         return (ip, device_name)
     except Exception:
         return None
@@ -273,13 +271,12 @@ def scan_network(port=PORT):
 
 
 def ping_phone(ip, port=PORT, timeout=2):
-    """仅检查是否在线，返回 True/False"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((ip, port))
         s.sendall(b"GET /ping HTTP/1.0\r\nHost: " + ip.encode() + b"\r\n\r\n")
-        data = s.recv(2048)
+        data = s.recv(4096)
         s.close()
         return b'"ok"' in data or b'200 OK' in data
     except Exception:
@@ -350,12 +347,12 @@ def create_icon():
 # 历史记录弹窗
 # ============================================================
 class HistoryPanel(QWidget):
-    item_selected = Signal(str)  # text
+    item_selected = Signal(str)
 
     def __init__(self, history, parent=None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedWidth(460)
+        self.setFixedWidth(520)
         self.history = history
         self._build()
 
@@ -387,7 +384,7 @@ class HistoryPanel(QWidget):
                 background: rgba(255, 255, 255, 0.08);
             }
         """)
-        container.setGeometry(0, 0, 460, 300)
+        container.setGeometry(0, 0, 520, 320)
         self.container = container
 
         title = QLabel("📋 历史记录（双击填入）")
@@ -490,6 +487,7 @@ class MainWindow(QWidget):
         self._discovering = False
         self._quitting = False
         self._send_fallback = None
+        self._scan_hard_timeout = None
 
         self.history = History()
 
@@ -536,11 +534,11 @@ class MainWindow(QWidget):
         self.status_dot.setFixedWidth(12)
         self.status_dot.setAlignment(Qt.AlignCenter)
 
-        # 状态文字（动态宽度，显示"已连接 iPhone 15"）
+        # 状态文字（加宽到 150px）
         self.status_text = QLabel("扫描中")
         self.status_text.setStyleSheet(
             "color: #8E8E93; font-size: 11px;")
-        self.status_text.setFixedWidth(110)
+        self.status_text.setFixedWidth(150)
         self.status_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         # 输入框
@@ -623,13 +621,11 @@ class MainWindow(QWidget):
             self.history_panel.hide()
             return
         self.history_panel.refresh()
-        # 显示在窗口正下方
         pos = self.mapToGlobal(QPoint(0, self.height() + 6))
         self.history_panel.move(pos)
         self.history_panel.show()
 
     def _on_history_picked(self, text):
-        # 重新解析一遍（因为可能只有 title 变了）
         title, is_fast = TitleParser.parse(text)
         if title:
             self.input.setText(title + (" - 极速" if is_fast else ""))
@@ -757,10 +753,13 @@ class MainWindow(QWidget):
         self.device_name = None
         self.set_status("未找到", "#FF3B30")
         self.send_btn.setEnabled(False)
-        QTimer.singleShot(1000, self.start_discovery)
+        QTimer.singleShot(500, self.start_discovery)
 
     def on_rediscover(self):
-        if self.device_ip or self._discovering:
+        """每 SCAN_INTERVAL 秒检查一次，如果没连接就重扫"""
+        if self.device_ip:
+            return
+        if self._discovering:
             return
         self.start_discovery()
 
@@ -772,21 +771,42 @@ class MainWindow(QWidget):
         self.set_status("扫描中", "#FF9500")
         self.send_btn.setEnabled(False)
 
+        # ✅ 硬超时保护：无论线程怎样，20 秒后强制重置
+        if self._scan_hard_timeout is not None:
+            self._scan_hard_timeout.stop()
+        self._scan_hard_timeout = QTimer(self)
+        self._scan_hard_timeout.setSingleShot(True)
+        self._scan_hard_timeout.timeout.connect(self._force_reset_scan)
+        self._scan_hard_timeout.start(SCAN_HARD_TIMEOUT * 1000)
+
         self._worker = DiscoveryWorker(PORT)
         self._worker.finished_scan.connect(self.on_discovery_finished)
         self._worker.start()
 
+    def _force_reset_scan(self):
+        """扫描超时，强制解锁"""
+        if self._discovering:
+            print("[Scan] 硬超时，强制重置扫描状态")
+            self._discovering = False
+            self.set_status("未找到", "#FF3B30")
+
     @Slot(list)
     def on_discovery_finished(self, ips):
+        # 停掉硬超时
+        if self._scan_hard_timeout is not None:
+            self._scan_hard_timeout.stop()
+            self._scan_hard_timeout = None
+
         self._discovering = False
+
         if ips:
             ip, name = ips[0]
             self.device_ip = ip
             self.device_name = name
-            # ✅ 显示"已连接 + 设备名"
+            # 截断过长的显示名
             display = f"已连接 {name}"
-            if len(display) > 14:
-                display = display[:14] + "…"
+            if len(display) > 17:
+                display = display[:17] + "…"
             self.set_status(display, "#34C759")
             self.status_text.setToolTip(f"{name}\nIP: {ip}")
             if self.input.text().strip():
@@ -808,12 +828,11 @@ class MainWindow(QWidget):
             self.status_text.setStyleSheet("color: #8E8E93; font-size: 11px;")
 
     def _restore_status(self):
-        """恢复到正常状态文字"""
         if self.device_ip:
             name = self.device_name or "手机"
             display = f"已连接 {name}"
-            if len(display) > 14:
-                display = display[:14] + "…"
+            if len(display) > 17:
+                display = display[:17] + "…"
             self.set_status(display, "#34C759")
         else:
             self.set_status("未找到", "#FF3B30")
@@ -828,11 +847,12 @@ class MainWindow(QWidget):
             self._flash("未连接", "#FF3B30")
             return
 
-        # 按钮进入"发送中"状态
         self.send_btn.setEnabled(False)
         self.send_btn.setText("...")
 
-        # ✅ 兜底定时器：无论线程如何，12 秒后强制恢复按钮
+        # 兜底定时器
+        if self._send_fallback is not None:
+            self._send_fallback.stop()
         self._send_fallback = QTimer(self)
         self._send_fallback.setSingleShot(True)
         self._send_fallback.timeout.connect(self._force_recover_button)
@@ -848,18 +868,15 @@ class MainWindow(QWidget):
         threading.Thread(target=do_send, daemon=True).start()
 
     def _force_recover_button(self):
-        """兜底：超时后强制恢复按钮状态"""
         if self.send_btn.text() == "...":
             self.send_btn.setEnabled(self.device_ip is not None)
             self.send_btn.setText("发送")
 
     def _on_send_result(self, sent_text, result):
-        # 取消兜底定时器
         if self._send_fallback is not None:
             self._send_fallback.stop()
             self._send_fallback = None
 
-        # 恢复按钮
         self.send_btn.setEnabled(True)
         self.send_btn.setText("发送")
 
@@ -870,13 +887,10 @@ class MainWindow(QWidget):
 
         if ok:
             self._flash("已发送", "#34C759")
-            # 记录历史
             title, _ = TitleParser.parse(sent_text)
             if title:
                 self.history.add(sent_text, title)
-            # 清空输入框
             self.input.clear()
-            # 如果历史面板开着，刷新一下
             if self.history_panel.isVisible():
                 self.history_panel.refresh()
         else:
