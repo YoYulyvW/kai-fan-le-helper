@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-开饭了助手 - Windows 置顶工具（精简版）
+开饭了助手 - Windows 置顶工具
 - 自动读取剪贴板
-- 发现局域网内运行"开饭了"的手机
+- 发现局域网内运行"开饭了"的手机（显示设备名）
 - 发送剧名到手机 /submit
+- 历史记录（本地 JSON 保存）
 """
 
 import sys
+import os
 import re
 import json
 import socket
@@ -15,14 +17,15 @@ import threading
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
-from PySide2.QtCore import Qt, QTimer, QThread, Signal, Slot
+from PySide2.QtCore import Qt, QTimer, QThread, Signal, Slot, QPoint
 from PySide2.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient
 )
 from PySide2.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
-    QSystemTrayIcon, QMenu, QAction, QLineEdit
+    QSystemTrayIcon, QMenu, QAction, QLineEdit, QListWidget, QListWidgetItem
 )
 
 # ============================================================
@@ -34,11 +37,18 @@ SCAN_MAX_WORKERS = 100
 SCAN_INTERVAL = 30
 HEARTBEAT_INTERVAL = 15
 CLIPBOARD_DEBOUNCE = 400
-SEND_TIMEOUT = 15
+SEND_TIMEOUT = 8          # 单次请求超时
+SEND_FALLBACK_MS = 12000  # 兜底恢复按钮时间（毫秒）
+MAX_HISTORY = 50          # 最多保存 50 条历史
 
 # 窗口尺寸
-WIN_WIDTH = 420
+WIN_WIDTH = 500
 WIN_HEIGHT = 44
+
+# 历史记录文件
+HISTORY_FILE = os.path.join(
+    os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
+)
 
 # ============================================================
 # 剧名解析
@@ -77,7 +87,6 @@ class TitleParser:
     def parse(text):
         if not text:
             return None, False
-
         s = text.strip()
         s = s.replace('＃', '#').replace('：', ':')
         s = re.sub(r'https?://\S+', '', s, flags=re.IGNORECASE)
@@ -87,18 +96,14 @@ class TitleParser:
         s = s.strip()
         s = re.sub(r'^[\d.]+\s+', '', s)
         s = s.strip()
-
         if not s:
             return None, False
-
         if '#' in s:
             title = TitleParser._from_hashtag(s)
         else:
             title = TitleParser._from_plain(s)
-
         if not title:
             return None, False
-
         is_fast = False
         m = re.search(r'\s*[-~－\u2010-\u2015]\s*极速\s*$', title)
         if m:
@@ -106,7 +111,6 @@ class TitleParser:
             if base:
                 title = base
                 is_fast = True
-
         return title, is_fast
 
     @staticmethod
@@ -129,14 +133,11 @@ class TitleParser:
         parts = s.split('#')
         before = parts[0].strip()
         tags = [p.strip() for p in parts[1:]]
-
         if before and before not in CATEGORY_TAGS:
             return TitleParser._clean(before)
-
         for tag in tags:
             if tag and tag not in CATEGORY_TAGS:
                 return TitleParser._clean(tag)
-
         if before:
             return TitleParser._clean(before)
         return None
@@ -169,6 +170,48 @@ class TitleParser:
 
 
 # ============================================================
+# 历史记录
+# ============================================================
+class History:
+    def __init__(self):
+        self.items = []
+        self.load()
+
+    def load(self):
+        try:
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.items = data[:MAX_HISTORY]
+        except Exception:
+            self.items = []
+
+    def save(self):
+        try:
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.items[:MAX_HISTORY], f,
+                          ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def add(self, text, title):
+        # 去重（同 title 只保留最新的）
+        self.items = [it for it in self.items if it.get("title") != title]
+        self.items.insert(0, {
+            "text": text,
+            "title": title,
+            "time": datetime.now().strftime("%m-%d %H:%M"),
+        })
+        self.items = self.items[:MAX_HISTORY]
+        self.save()
+
+    def clear(self):
+        self.items = []
+        self.save()
+
+
+# ============================================================
 # 网络工具
 # ============================================================
 def get_local_ip():
@@ -183,23 +226,35 @@ def get_local_ip():
 
 
 def check_ip(ip, port=PORT, timeout=SCAN_TIMEOUT):
+    """返回 (ip, device_name) 或 None"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((ip, port))
         s.sendall(b"GET /ping HTTP/1.0\r\nHost: " + ip.encode() + b"\r\n\r\n")
-        data = s.recv(1024)
+        data = s.recv(2048)
         s.close()
-        if b'"ok"' in data and b'"app"' in data:
-            return ip
-        if b'200 OK' in data:
-            return ip
+
+        if b'"ok"' not in data and b'200 OK' not in data:
+            return None
+
+        device_name = "开饭了"
+        # 尝试解析 JSON body
+        if b'\r\n\r\n' in data:
+            try:
+                body = data.split(b'\r\n\r\n', 1)[1]
+                info = json.loads(body.decode('utf-8', errors='ignore'))
+                device_name = info.get("device", "开饭了")
+            except Exception:
+                pass
+
+        return (ip, device_name)
     except Exception:
-        pass
-    return None
+        return None
 
 
 def scan_network(port=PORT):
+    """返回 [(ip, device_name), ...]"""
     local_ip = get_local_ip()
     if not local_ip:
         return []
@@ -218,7 +273,17 @@ def scan_network(port=PORT):
 
 
 def ping_phone(ip, port=PORT, timeout=2):
-    return check_ip(ip, port, timeout) is not None
+    """仅检查是否在线，返回 True/False"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip, port))
+        s.sendall(b"GET /ping HTTP/1.0\r\nHost: " + ip.encode() + b"\r\n\r\n")
+        data = s.recv(2048)
+        s.close()
+        return b'"ok"' in data or b'200 OK' in data
+    except Exception:
+        return False
 
 
 def send_to_phone(ip, text, port=PORT, timeout=SEND_TIMEOUT):
@@ -282,6 +347,127 @@ def create_icon():
 
 
 # ============================================================
+# 历史记录弹窗
+# ============================================================
+class HistoryPanel(QWidget):
+    item_selected = Signal(str)  # text
+
+    def __init__(self, history, parent=None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedWidth(460)
+        self.history = history
+        self._build()
+
+    def _build(self):
+        container = QWidget(self)
+        container.setObjectName("container")
+        container.setStyleSheet("""
+            #container {
+                background: rgba(28, 28, 30, 0.98);
+                border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+            }
+            QListWidget {
+                background: transparent;
+                border: none;
+                outline: none;
+                color: #FFFFFF;
+                font-size: 13px;
+            }
+            QListWidget::item {
+                padding: 8px 14px;
+                border-radius: 6px;
+                margin: 2px 6px;
+            }
+            QListWidget::item:selected {
+                background: #6366F1;
+            }
+            QListWidget::item:hover {
+                background: rgba(255, 255, 255, 0.08);
+            }
+        """)
+        container.setGeometry(0, 0, 460, 300)
+        self.container = container
+
+        title = QLabel("📋 历史记录（双击填入）")
+        title.setStyleSheet(
+            "color: #FFFFFF; font-size: 13px; font-weight: 600;"
+            "padding: 4px 4px;"
+        )
+
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(self._on_double_click)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(6)
+        bottom.addStretch()
+
+        clear_btn = QPushButton("清空")
+        clear_btn.setFixedHeight(26)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 59, 48, 0.2);
+                color: #FF453A;
+                border: none; border-radius: 8px;
+                padding: 0 14px; font-size: 12px;
+            }
+            QPushButton:hover { background: rgba(255, 59, 48, 0.3); }
+        """)
+        clear_btn.clicked.connect(self._on_clear)
+
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedHeight(26)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.08);
+                color: #FFFFFF;
+                border: none; border-radius: 8px;
+                padding: 0 14px; font-size: 12px;
+            }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.15); }
+        """)
+        close_btn.clicked.connect(self.hide)
+
+        bottom.addWidget(clear_btn)
+        bottom.addWidget(close_btn)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+        layout.addWidget(title)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(bottom)
+        container.setLayout(layout)
+
+    def refresh(self):
+        self.list.clear()
+        if not self.history.items:
+            it = QListWidgetItem("(暂无历史记录)")
+            it.setFlags(Qt.NoItemFlags)
+            self.list.addItem(it)
+            return
+        for it in self.history.items:
+            text = f"{it['title']}"
+            if it.get('time'):
+                text += f"  ·  {it['time']}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, it['text'])
+            self.list.addItem(item)
+
+    def _on_double_click(self, item):
+        text = item.data(Qt.UserRole)
+        if text:
+            self.item_selected.emit(text)
+            self.hide()
+
+    def _on_clear(self):
+        self.history.clear()
+        self.refresh()
+
+
+# ============================================================
 # 主窗口
 # ============================================================
 class MainWindow(QWidget):
@@ -298,14 +484,19 @@ class MainWindow(QWidget):
         self.setWindowIcon(create_icon())
 
         self.device_ip = None
+        self.device_name = None
         self.last_clipboard = ""
         self._drag_pos = None
         self._discovering = False
         self._quitting = False
+        self._send_fallback = None
+
+        self.history = History()
 
         self.setup_ui()
         self.setup_clipboard()
         self.setup_tray()
+        self.setup_history_panel()
         self.setup_timers()
 
         self.position_top_right()
@@ -345,11 +536,11 @@ class MainWindow(QWidget):
         self.status_dot.setFixedWidth(12)
         self.status_dot.setAlignment(Qt.AlignCenter)
 
-        # 状态文字（保留"已连接"等提示）
+        # 状态文字（动态宽度，显示"已连接 iPhone 15"）
         self.status_text = QLabel("扫描中")
         self.status_text.setStyleSheet(
             "color: #8E8E93; font-size: 11px;")
-        self.status_text.setFixedWidth(46)
+        self.status_text.setFixedWidth(110)
         self.status_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         # 输入框
@@ -358,6 +549,21 @@ class MainWindow(QWidget):
         self.input.setFixedHeight(30)
         self.input.setMinimumWidth(140)
         self.input.returnPressed.connect(self.on_send)
+
+        # 历史按钮
+        self.history_btn = QPushButton("📋")
+        self.history_btn.setFixedSize(30, 30)
+        self.history_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.08);
+                color: #FFFFFF;
+                border: none; border-radius: 8px;
+                font-size: 14px;
+            }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.15); }
+            QPushButton:pressed { background: rgba(255, 255, 255, 0.2); }
+        """)
+        self.history_btn.clicked.connect(self.toggle_history)
 
         # 发送按钮
         self.send_btn = QPushButton("发送")
@@ -396,6 +602,7 @@ class MainWindow(QWidget):
         row.addWidget(self.status_dot)
         row.addWidget(self.status_text)
         row.addWidget(self.input, 1)
+        row.addWidget(self.history_btn)
         row.addWidget(self.send_btn)
         row.addWidget(self.close_btn)
         container.setLayout(row)
@@ -405,6 +612,30 @@ class MainWindow(QWidget):
         x = screen.right() - self.width() - 20
         y = screen.top() + 20
         self.move(x, y)
+
+    # ---------- 历史面板 ----------
+    def setup_history_panel(self):
+        self.history_panel = HistoryPanel(self.history)
+        self.history_panel.item_selected.connect(self._on_history_picked)
+
+    def toggle_history(self):
+        if self.history_panel.isVisible():
+            self.history_panel.hide()
+            return
+        self.history_panel.refresh()
+        # 显示在窗口正下方
+        pos = self.mapToGlobal(QPoint(0, self.height() + 6))
+        self.history_panel.move(pos)
+        self.history_panel.show()
+
+    def _on_history_picked(self, text):
+        # 重新解析一遍（因为可能只有 title 变了）
+        title, is_fast = TitleParser.parse(text)
+        if title:
+            self.input.setText(title + (" - 极速" if is_fast else ""))
+        else:
+            self.input.setText(text)
+        self.send_btn.setEnabled(self.device_ip is not None)
 
     # ---------- 拖动 ----------
     def mousePressEvent(self, event):
@@ -460,6 +691,10 @@ class MainWindow(QWidget):
         rediscover_action.triggered.connect(self.start_discovery)
         menu.addAction(rediscover_action)
 
+        history_action = QAction("历史记录", self)
+        history_action.triggered.connect(self._show_history_from_tray)
+        menu.addAction(history_action)
+
         menu.addSeparator()
 
         quit_action = QAction("退出", self)
@@ -469,6 +704,10 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _show_history_from_tray(self):
+        self.show_window()
+        QTimer.singleShot(100, self.toggle_history)
 
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.DoubleClick:
@@ -515,6 +754,7 @@ class MainWindow(QWidget):
         if not self.device_ip:
             return
         self.device_ip = None
+        self.device_name = None
         self.set_status("未找到", "#FF3B30")
         self.send_btn.setEnabled(False)
         QTimer.singleShot(1000, self.start_discovery)
@@ -540,14 +780,20 @@ class MainWindow(QWidget):
     def on_discovery_finished(self, ips):
         self._discovering = False
         if ips:
-            self.device_ip = ips[0]
-            # ✅ 状态文字显示"已连接"，IP 放在 tooltip
-            self.set_status("已连接", "#34C759")
-            self.status_text.setToolTip(f"IP: {self.device_ip}")
+            ip, name = ips[0]
+            self.device_ip = ip
+            self.device_name = name
+            # ✅ 显示"已连接 + 设备名"
+            display = f"已连接 {name}"
+            if len(display) > 14:
+                display = display[:14] + "…"
+            self.set_status(display, "#34C759")
+            self.status_text.setToolTip(f"{name}\nIP: {ip}")
             if self.input.text().strip():
                 self.send_btn.setEnabled(True)
         else:
             self.device_ip = None
+            self.device_name = None
             self.set_status("未找到", "#FF3B30")
             self.send_btn.setEnabled(False)
 
@@ -561,45 +807,87 @@ class MainWindow(QWidget):
         else:
             self.status_text.setStyleSheet("color: #8E8E93; font-size: 11px;")
 
+    def _restore_status(self):
+        """恢复到正常状态文字"""
+        if self.device_ip:
+            name = self.device_name or "手机"
+            display = f"已连接 {name}"
+            if len(display) > 14:
+                display = display[:14] + "…"
+            self.set_status(display, "#34C759")
+        else:
+            self.set_status("未找到", "#FF3B30")
+
     # ---------- 发送 ----------
     def on_send(self):
         text = self.input.text().strip()
         if not text:
-            self.flash_status("无内容", "#FF9500")
+            self._flash("无内容", "#FF9500")
             return
         if not self.device_ip:
-            self.flash_status("未连接", "#FF3B30")
+            self._flash("未连接", "#FF3B30")
             return
 
-        def do_send():
-            result = send_to_phone(self.device_ip, text)
-            QTimer.singleShot(0, lambda: self._on_send_result(result))
-
+        # 按钮进入"发送中"状态
         self.send_btn.setEnabled(False)
         self.send_btn.setText("...")
+
+        # ✅ 兜底定时器：无论线程如何，12 秒后强制恢复按钮
+        self._send_fallback = QTimer(self)
+        self._send_fallback.setSingleShot(True)
+        self._send_fallback.timeout.connect(self._force_recover_button)
+        self._send_fallback.start(SEND_FALLBACK_MS)
+
+        def do_send():
+            try:
+                result = send_to_phone(self.device_ip, text)
+            except Exception as e:
+                result = {"ok": False, "message": str(e)}
+            QTimer.singleShot(0, lambda: self._on_send_result(text, result))
+
         threading.Thread(target=do_send, daemon=True).start()
 
-    def _on_send_result(self, result):
+    def _force_recover_button(self):
+        """兜底：超时后强制恢复按钮状态"""
+        if self.send_btn.text() == "...":
+            self.send_btn.setEnabled(self.device_ip is not None)
+            self.send_btn.setText("发送")
+
+    def _on_send_result(self, sent_text, result):
+        # 取消兜底定时器
+        if self._send_fallback is not None:
+            self._send_fallback.stop()
+            self._send_fallback = None
+
+        # 恢复按钮
         self.send_btn.setEnabled(True)
         self.send_btn.setText("发送")
 
-        if result.get("ok"):
-            self.flash_status("已发送", "#34C759")
+        try:
+            ok = bool(result.get("ok"))
+        except Exception:
+            ok = False
+
+        if ok:
+            self._flash("已发送", "#34C759")
+            # 记录历史
+            title, _ = TitleParser.parse(sent_text)
+            if title:
+                self.history.add(sent_text, title)
+            # 清空输入框
             self.input.clear()
+            # 如果历史面板开着，刷新一下
+            if self.history_panel.isVisible():
+                self.history_panel.refresh()
         else:
-            self.flash_status("失败", "#FF3B30")
+            msg = result.get("message", "失败")
+            if len(msg) > 6:
+                msg = "失败"
+            self._flash(msg, "#FF3B30")
 
-    def flash_status(self, text, color):
-        old_text = self.status_text.text()
+    def _flash(self, text, color):
         self.set_status(text, color)
-
-        def restore():
-            if self.device_ip:
-                self.set_status("已连接", "#34C759")
-            else:
-                self.set_status("未找到", "#FF3B30")
-
-        QTimer.singleShot(1500, restore)
+        QTimer.singleShot(1500, self._restore_status)
 
 
 # ============================================================
