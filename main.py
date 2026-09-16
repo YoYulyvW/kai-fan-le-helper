@@ -48,7 +48,7 @@ INPUT_WIDTH = 150
 STATUS_MIN_W = 56
 STATUS_MAX_W = 110
 
-THEME_POLL_INTERVAL = 2000  # 每 2 秒检测一次系统主题（毫秒）
+THEME_POLL_INTERVAL = 2000
 
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
@@ -158,7 +158,7 @@ class ThemeManager:
         if mode == "dark":
             return {
                 "bg":           "rgba(28, 28, 30, 0.97)",
-                "bg_solid":     "#1c1c1e",               # 纯色
+                "bg_solid":     "#1c1c1e",
                 "border":       "rgba(255, 255, 255, 0.14)",
                 "text":         "#FFFFFF",
                 "text_sub":     "#8E8E93",
@@ -177,7 +177,7 @@ class ThemeManager:
         else:
             return {
                 "bg":           "rgba(255, 255, 255, 0.98)",
-                "bg_solid":     "#f2f2f2",               # 纯色
+                "bg_solid":     "#f2f2f2",
                 "border":       "rgba(0, 0, 0, 0.10)",
                 "text":         "#1C1C1E",
                 "text_sub":     "#6E6E73",
@@ -557,13 +557,11 @@ class DevicePanel(QWidget):
         self._relayout()
 
     def showEvent(self, event):
-        # 每次显示时刷新主题，防止主题切换后不更新
         self.apply_theme()
         super().showEvent(event)
 
     def apply_theme(self):
         c = ThemeManager.colors()
-        # 用纯色 bg_solid，避免 Qt.Popup 下 rgba 渲染异常
         self.container.setStyleSheet(f"""
             #container {{
                 background: {c['bg_solid']};
@@ -698,13 +696,11 @@ class HistoryPanel(QWidget):
         self.container.setGeometry(0, 0, WIN_WIDTH, 320)
 
     def showEvent(self, event):
-        # 每次显示时刷新主题，防止主题切换后不更新
         self.apply_theme()
         super().showEvent(event)
 
     def apply_theme(self):
         c = ThemeManager.colors()
-        # 用纯色 bg_solid，避免 Qt.Popup 下 rgba 渲染异常
         self.container.setStyleSheet(f"""
             #container {{
                 background: {c['bg_solid']};
@@ -786,6 +782,10 @@ class HistoryPanel(QWidget):
 # 主窗口
 # ============================================================
 class MainWindow(QWidget):
+    # ===== 跨线程信号（关键修复）=====
+    devices_offline_signal = Signal(list)         # 心跳检测到的掉线 IP 列表
+    send_result_signal = Signal(str, str, dict)   # ip, text, result
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("开饭了助手")
@@ -815,7 +815,16 @@ class MainWindow(QWidget):
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._restore_status)
 
+        # 发送兜底：网络库卡住时强制恢复按钮
+        self._send_guard_timer = QTimer(self)
+        self._send_guard_timer.setSingleShot(True)
+        self._send_guard_timer.timeout.connect(self._recover_send_btn)
+
         self.history = History()
+
+        # 连接跨线程信号到主线程槽
+        self.devices_offline_signal.connect(self._on_devices_offline)
+        self.send_result_signal.connect(self._on_send_result)
 
         self.setup_ui()
         self.setup_clipboard()
@@ -1190,7 +1199,6 @@ class MainWindow(QWidget):
         self._scan_timer.setSingleShot(True)
         self._scan_timer.timeout.connect(self._run_scheduled_scan)
 
-        # 系统主题轮询：跟随系统主题变化
         self._theme_poll_timer = QTimer(self)
         self._theme_poll_timer.timeout.connect(self._poll_system_theme)
         self._theme_poll_timer.start(THEME_POLL_INTERVAL)
@@ -1216,6 +1224,7 @@ class MainWindow(QWidget):
             return
         self.start_discovery(silent=False)
 
+    # ---------- 心跳 ----------
     def on_heartbeat(self):
         if not self.devices:
             return
@@ -1228,8 +1237,8 @@ class MainWindow(QWidget):
                 if not ping_phone(ip, timeout=HEARTBEAT_TIMEOUT):
                     offline.append(ip)
             if offline:
-                QTimer.singleShot(
-                    0, lambda: self._on_devices_offline(offline))
+                # ★ 用 Signal 跨线程投递（线程安全的）
+                self.devices_offline_signal.emit(offline)
 
         threading.Thread(target=do_ping_all, daemon=True).start()
 
@@ -1430,17 +1439,29 @@ class MainWindow(QWidget):
         self.input.clear()
         self.send_btn.setEnabled(False)
 
+        # 兜底：网络库卡住时强制恢复按钮
+        self._send_guard_timer.start((SEND_TIMEOUT + 2) * 1000)
+
         def do_send():
             try:
                 result = send_to_phone(ip, text)
             except Exception as e:
                 result = {"ok": False, "message": str(e)}
-            QTimer.singleShot(
-                0, lambda: self._on_send_result(ip, text, result))
+            # ★ 用 Signal 跨线程投递
+            self.send_result_signal.emit(ip, text, result)
 
         threading.Thread(target=do_send, daemon=True).start()
 
+    def _recover_send_btn(self):
+        """发送超时兜底：强制恢复按钮可用"""
+        if not self.send_btn.isEnabled():
+            self.send_btn.setEnabled(
+                self.current_ip is not None
+                and bool(self.input.text().strip()))
+
     def _on_send_result(self, ip, sent_text, result):
+        self._send_guard_timer.stop()
+
         try:
             ok = bool(result.get("ok"))
         except Exception:
@@ -1458,6 +1479,11 @@ class MainWindow(QWidget):
             self._on_devices_offline([ip])
         else:
             self._flash("失败", "#FF3B30")
+
+        # 恢复按钮（发送失败后允许重试）
+        self.send_btn.setEnabled(
+            self.current_ip is not None
+            and bool(self.input.text().strip()))
 
     def _flash(self, text, color):
         self.set_line1(f"● {text}", color)
