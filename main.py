@@ -1105,33 +1105,38 @@ class MainWindow(QWidget):
 
     # ---------- 方案 D：广播命中 ----------
     def _on_broadcast_hit(self, ip, port):
-        """收到手机广播 → 立即 ping 该 IP，成功则直接加入设备列表"""
+        """
+        收到手机 UDP 广播 → 异步 ping 确认 → 加入设备列表
+        ip:   手机 IP
+        port: 手机 HTTP 服务端口（8848）
+        """
         now = datetime.now().timestamp()
         last = self._recent_broadcast.get(ip, 0)
         if now - last < 1.0:
             return                       # 1 秒内同 IP 只处理一次
         self._recent_broadcast[ip] = now
 
-        # 已经在设备列表中 → 刷新退避即可
+        # 已在设备列表中 → 只刷新退避即可
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
                 self._reset_backoff()
                 return
 
+        # 异步 ping 确认，避免阻塞 UI
         def do_ping():
             result = check_ip(ip, port=port, timeout=1.0)
             if result:
-                self.broadcast_hit_signal.emit(ip, port)
-                # 二次 emit 用于实际添加（见下）
-                QTimer.singleShot(0, lambda: self._add_device_from_broadcast(result))
+                # 切回主线程更新 UI
+                QTimer.singleShot(
+                    0, lambda: self._add_device_from_broadcast(result))
 
-        # check_ip 在子线程里跑
         threading.Thread(target=do_ping, daemon=True).start()
 
     def _add_device_from_broadcast(self, result):
-        """把广播发现的新设备加入列表"""
+        """将广播发现的新设备加入列表"""
         ip, name = result
-        # 去重
+
+        # 再次去重（防竞态）
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
                 self._reset_backoff()
@@ -1140,6 +1145,7 @@ class MainWindow(QWidget):
         self.devices.append((ip, name))
         self.devices.sort(
             key=lambda x: tuple(int(p) for p in x[0].split('.')))
+
         # 选中新加入的设备
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
@@ -1151,6 +1157,7 @@ class MainWindow(QWidget):
         self.send_btn.setEnabled(
             self.current_ip is not None
             and bool(self.input.text().strip()))
+
         if self.device_panel.isVisible():
             self.device_panel.refresh(self.devices, self.current_index)
 
