@@ -48,16 +48,61 @@ SCAN_BACKOFF_INITIAL = 10
 SCAN_BACKOFF_MAX = 60
 
 # 窗口尺寸
-WIN_WIDTH = 510
-WIN_HEIGHT = 48
+WIN_WIDTH = 400
+WIN_HEIGHT = 44
 
 # 输入框宽度（约 10 个汉字 + padding）
 INPUT_WIDTH = 150
+
+# 状态文字宽度（含手机名）
+STATUS_WIDTH = 108
 
 # 历史记录文件
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
 )
+
+
+# ============================================================
+# 剪贴板垃圾过滤
+# ============================================================
+_FILE_EXT_PATTERN = re.compile(
+    r'\.(apk|exe|zip|rar|7z|tar|gz|bz2|xz|'
+    r'png|jpg|jpeg|gif|bmp|webp|svg|ico|'
+    r'mp4|avi|mov|mkv|flv|wmv|webm|'
+    r'mp3|wav|flac|aac|ogg|m4a|'
+    r'txt|doc|docx|xls|xlsx|ppt|pptx|pdf|'
+    r'py|js|ts|java|cpp|c|h|hpp|cs|go|rs|rb|php|'
+    r'json|xml|yaml|yml|toml|ini|cfg|conf|log|md|'
+    r'html|htm|css|scss|less|sql|sh|bat|ps1'
+    r')$',
+    re.IGNORECASE
+)
+
+
+def is_noise_clipboard(text):
+    """判断剪贴板内容是否应该被忽略（本地文件路径、纯文件等）"""
+    if not text:
+        return True
+    s = text.strip()
+    if not s:
+        return True
+    # 本地文件 URL 如 file:///C:/Users/...
+    if s.lower().startswith('file:'):
+        return True
+    # Windows 绝对路径 如 C:\Users\... 或 C:/Users/...
+    if re.match(r'^[A-Za-z]:[\\/]', s):
+        return True
+    # UNC 路径 \\server\share
+    if s.startswith('\\\\'):
+        return True
+    # Unix 绝对路径
+    if s.startswith('/') and not s.startswith('//'):
+        return True
+    # 单个文件路径（无空格，以已知扩展名结尾）
+    if ' ' not in s and '\n' not in s and _FILE_EXT_PATTERN.search(s):
+        return True
+    return False
 
 
 # ============================================================
@@ -466,6 +511,7 @@ class DevicePanel(QWidget):
     def _build(self):
         self.container = QWidget(self)
         self.container.setObjectName("container")
+        self.container.setAttribute(Qt.WA_StyledBackground, True)
 
         self.title = QLabel("📱 选择目标设备")
         self.title.setObjectName("title")
@@ -590,6 +636,7 @@ class HistoryPanel(QWidget):
     def _build(self):
         self.container = QWidget(self)
         self.container.setObjectName("container")
+        self.container.setAttribute(Qt.WA_StyledBackground, True)
 
         self.title = QLabel("📋 历史记录（双击填入）")
         self.title.setObjectName("title")
@@ -773,45 +820,38 @@ class MainWindow(QWidget):
     def setup_ui(self):
         self.container = QWidget(self)
         self.container.setObjectName("container")
+        self.container.setAttribute(Qt.WA_StyledBackground, True)
         self.container.setGeometry(0, 0, WIN_WIDTH, WIN_HEIGHT)
 
         # 状态点（可点击）
         self.status_dot = QLabel("●")
-        self.status_dot.setFixedWidth(12)
+        self.status_dot.setFixedWidth(10)
         self.status_dot.setAlignment(Qt.AlignCenter)
         self.status_dot.setCursor(Qt.PointingHandCursor)
         self.status_dot.mousePressEvent = self._on_status_clicked
 
-        # 状态文字（可点击）
+        # 状态文字（含手机名，可点击）
         self.status_text = QLabel("扫描中")
-        self.status_text.setFixedWidth(80)
+        self.status_text.setFixedWidth(STATUS_WIDTH)
         self.status_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.status_text.setCursor(Qt.PointingHandCursor)
         self.status_text.mousePressEvent = self._on_status_clicked
 
-        # 输入框：固定 150px（≈ 10 个汉字 + padding）
+        # 输入框：固定 150px（≈ 10 个汉字 + padding），紧贴历史按钮
         self.input = QLineEdit()
         self.input.setPlaceholderText("等待剪贴板...")
-        self.input.setFixedHeight(32)
+        self.input.setFixedHeight(28)
         self.input.setFixedWidth(INPUT_WIDTH)
         self.input.returnPressed.connect(self.on_send)
 
-        # 手机名：自适应，最多 110px，超长自动省略
-        self.device_name_label = QLabel("")
-        self.device_name_label.setMinimumWidth(40)
-        self.device_name_label.setMaximumWidth(110)
-        self.device_name_label.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.device_name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
         # 历史按钮
         self.history_btn = QPushButton("📋")
-        self.history_btn.setFixedSize(32, 32)
+        self.history_btn.setFixedSize(28, 28)
         self.history_btn.clicked.connect(self.toggle_history)
 
         # 发送按钮
         self.send_btn = QPushButton("发送")
-        self.send_btn.setFixedSize(52, 32)
+        self.send_btn.setFixedSize(48, 28)
         self.send_btn.setStyleSheet("""
             QPushButton {
                 background: #34C759; color: white;
@@ -827,7 +867,7 @@ class MainWindow(QWidget):
 
         # 关闭按钮
         self.close_btn = QPushButton("✕")
-        self.close_btn.setFixedSize(24, 24)
+        self.close_btn.setFixedSize(22, 22)
         self.close_btn.clicked.connect(self.hide)
 
         row = QHBoxLayout()
@@ -836,7 +876,6 @@ class MainWindow(QWidget):
         row.addWidget(self.status_dot)
         row.addWidget(self.status_text)
         row.addWidget(self.input)
-        row.addWidget(self.device_name_label)
         row.addWidget(self.history_btn)
         row.addWidget(self.send_btn)
         row.addWidget(self.close_btn)
@@ -865,11 +904,6 @@ class MainWindow(QWidget):
                 background: {c['input_focus']};
             }}
         """)
-
-        # 手机名颜色跟随主题
-        self.device_name_label.setStyleSheet(
-            f"color: {c['text_sub']}; font-size: 11px; background: transparent;"
-        )
 
         self._update_status()
 
@@ -1001,6 +1035,10 @@ class MainWindow(QWidget):
         if not text or text == self.last_clipboard:
             return
         self.last_clipboard = text
+
+        # 过滤本地文件路径、纯文件等无关内容
+        if is_noise_clipboard(text):
+            return
 
         title, is_fast = TitleParser.parse(text)
         if title:
@@ -1237,8 +1275,6 @@ class MainWindow(QWidget):
         if self._discovering:
             self.set_status_text("扫描中", "#FF9500")
             self.status_text.setToolTip("正在扫描局域网...")
-            self.device_name_label.setText("")
-            self.device_name_label.setToolTip("")
             return
 
         n = len(self.devices)
@@ -1246,22 +1282,21 @@ class MainWindow(QWidget):
             self.set_status_text("未找到", "#FF3B30")
             self.status_text.setToolTip(
                 "未发现局域网内的手机\n点击立即重新扫描")
-            self.device_name_label.setText("")
-            self.device_name_label.setToolTip("")
             return
 
-        if n == 1:
-            display = "已连接"
-        else:
-            display = f"已连接({n})"
-
         name = self.current_name or "手机"
-        # 手机名过长时省略
-        fm = QFontMetrics(self.device_name_label.font())
-        max_w = self.device_name_label.maximumWidth() - 4
-        elided = fm.elidedText(name, Qt.ElideRight, max_w)
-        self.device_name_label.setText(elided)
-        self.device_name_label.setToolTip(f"{name}\nIP: {self.current_ip}")
+
+        # 计算前缀 + 名字省略
+        if n == 1:
+            prefix = "已连接 "
+        else:
+            prefix = f"已连{n}台 "
+
+        fm = QFontMetrics(self.status_text.font())
+        prefix_w = fm.horizontalAdvance(prefix)
+        avail = max(20, STATUS_WIDTH - prefix_w - 4)
+        elided_name = fm.elidedText(name, Qt.ElideRight, avail)
+        display = prefix + elided_name
 
         tip = f"{name}\nIP: {self.current_ip}"
         if n > 1:
