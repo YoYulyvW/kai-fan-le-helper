@@ -25,18 +25,18 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Python 3.10
+      - name: Setup Python 3.8
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.8.10'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PySide2==5.15.2.1 pyinstaller
+          pip install PySide2==5.15.2.1 pyinstaller==5.13.2
 
       - name: Build EXE
-        run: pyinstaller --noconfirm --onefile --windowed --name KaiFanLe-Helper --distpath build_output --workpath build_temp --specpath build_temp --clean main.py
+        run: pyinstaller --noconfirm --onefile --windowed --name KaiFanLe-Helper --win-private-assemblies --distpath build_output --workpath build_temp --specpath build_temp --clean main.py
 
       - name: Replace dist (remove old, put new)
         shell: pwsh
