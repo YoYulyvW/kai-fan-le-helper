@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 开饭了助手 - Windows 置顶工具
+- 方案 C：复制链接 / 窗口激活时触发扫描
+- 方案 D：监听手机端 UDP 广播，毫秒级发现
 """
 
 import sys
@@ -30,16 +32,17 @@ from PySide2.QtWidgets import (
 # 配置
 # ============================================================
 PORT = 8848
-SCAN_TIMEOUT = 0.5
-SCAN_MAX_WORKERS = 80
+BROADCAST_PORT = 8849          # 手机端 UDP 广播目标端口
+SCAN_TIMEOUT = 0.3
+SCAN_MAX_WORKERS = 128
 HEARTBEAT_INTERVAL = 6
 HEARTBEAT_TIMEOUT = 1.5
 CLIPBOARD_DEBOUNCE = 400
 SEND_TIMEOUT = 4
 MAX_HISTORY = 50
 
-SCAN_BACKOFF_INITIAL = 10
-SCAN_BACKOFF_MAX = 60
+# 扫描退避序列（秒）：前 30 秒高频，之后降频
+SCAN_BACKOFF_SEQUENCE = [5, 5, 5, 5, 5, 5, 10, 15, 30, 60]
 
 WIN_WIDTH = 380
 WIN_HEIGHT = 44
@@ -482,6 +485,82 @@ class DiscoveryWorker(QThread):
 
 
 # ============================================================
+# 方案 D：UDP 广播监听线程
+# ============================================================
+class BroadcastListener(QThread):
+    """
+    监听手机端发来的 UDP 广播：
+        {"magic": "KFL", "action": "hello", "port": 8848}
+    源 IP 即为手机 IP。
+    """
+    device_announced = Signal(str, int)   # ip, port
+
+    def __init__(self, listen_port=BROADCAST_PORT):
+        super().__init__()
+        self.listen_port = listen_port
+        self._running = True
+        self._sock = None
+
+    def stop(self):
+        self._running = False
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except Exception:
+            pass
+
+    def run(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            try:
+                sock.bind(('0.0.0.0', self.listen_port))
+            except Exception:
+                # 端口占用或被防火墙拦住
+                return
+            sock.settimeout(1.0)
+            self._sock = sock
+        except Exception:
+            return
+
+        while self._running:
+            try:
+                data, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+            try:
+                msg = json.loads(data.decode('utf-8', errors='ignore'))
+            except Exception:
+                continue
+
+            if not isinstance(msg, dict):
+                continue
+            if msg.get('magic') != 'KFL':
+                continue
+            if msg.get('action') != 'hello':
+                continue
+
+            try:
+                port = int(msg.get('port') or PORT)
+            except Exception:
+                port = PORT
+
+            ip = addr[0]
+            if ip and ip != '0.0.0.0':
+                self.device_announced.emit(ip, port)
+
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except Exception:
+            pass
+
+
+# ============================================================
 # 图标
 # ============================================================
 def create_icon():
@@ -782,9 +861,9 @@ class HistoryPanel(QWidget):
 # 主窗口
 # ============================================================
 class MainWindow(QWidget):
-    # ===== 跨线程信号（关键修复）=====
-    devices_offline_signal = Signal(list)         # 心跳检测到的掉线 IP 列表
-    send_result_signal = Signal(str, str, dict)   # ip, text, result
+    devices_offline_signal = Signal(list)
+    send_result_signal = Signal(str, str, dict)
+    broadcast_hit_signal = Signal(str, int)      # 方案 D：收到广播
 
     def __init__(self):
         super().__init__()
@@ -808,29 +887,37 @@ class MainWindow(QWidget):
         self._quitting = False
         self._scan_hard_timeout = None
 
-        self._scan_backoff = SCAN_BACKOFF_INITIAL
+        self._scan_backoff_idx = 0
         self._scan_id = 0
 
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._restore_status)
 
-        # 发送兜底：网络库卡住时强制恢复按钮
         self._send_guard_timer = QTimer(self)
         self._send_guard_timer.setSingleShot(True)
         self._send_guard_timer.timeout.connect(self._recover_send_btn)
 
+        # 方案 D：广播源 IP 去重（1 秒内同 IP 只处理一次）
+        self._recent_broadcast = {}
+
         self.history = History()
 
-        # 连接跨线程信号到主线程槽
         self.devices_offline_signal.connect(self._on_devices_offline)
         self.send_result_signal.connect(self._on_send_result)
+        self.broadcast_hit_signal.connect(self._on_broadcast_hit)
 
         self.setup_ui()
         self.setup_clipboard()
         self.setup_tray()
         self.setup_panels()
         self.setup_timers()
+
+        # 方案 D：启动广播监听
+        self._broadcast_listener = BroadcastListener(BROADCAST_PORT)
+        self._broadcast_listener.device_announced.connect(
+            self.broadcast_hit_signal)
+        self._broadcast_listener.start()
 
         ThemeManager.apply_mode()
         self.apply_theme()
@@ -853,6 +940,17 @@ class MainWindow(QWidget):
     def current_name(self):
         d = self.current_device
         return d[1] if d else None
+
+    # ---------- 退避辅助 ----------
+    def _reset_backoff(self):
+        self._scan_backoff_idx = 0
+
+    def _advance_backoff(self):
+        if self._scan_backoff_idx < len(SCAN_BACKOFF_SEQUENCE) - 1:
+            self._scan_backoff_idx += 1
+
+    def _current_backoff_seconds(self):
+        return SCAN_BACKOFF_SEQUENCE[self._scan_backoff_idx]
 
     # ---------- UI ----------
     def setup_ui(self):
@@ -1000,10 +1098,61 @@ class MainWindow(QWidget):
             return
         if hasattr(self, '_scan_timer'):
             self._scan_timer.stop()
-        self._scan_backoff = SCAN_BACKOFF_INITIAL
+        self._reset_backoff()
         if self._discovering:
             return
         self.start_discovery(silent=False)
+
+    # ---------- 方案 D：广播命中 ----------
+    def _on_broadcast_hit(self, ip, port):
+        """收到手机广播 → 立即 ping 该 IP，成功则直接加入设备列表"""
+        now = datetime.now().timestamp()
+        last = self._recent_broadcast.get(ip, 0)
+        if now - last < 1.0:
+            return                       # 1 秒内同 IP 只处理一次
+        self._recent_broadcast[ip] = now
+
+        # 已经在设备列表中 → 刷新退避即可
+        for i, (dip, _) in enumerate(self.devices):
+            if dip == ip:
+                self._reset_backoff()
+                return
+
+        def do_ping():
+            result = check_ip(ip, port=port, timeout=1.0)
+            if result:
+                self.broadcast_hit_signal.emit(ip, port)
+                # 二次 emit 用于实际添加（见下）
+                QTimer.singleShot(0, lambda: self._add_device_from_broadcast(result))
+
+        # check_ip 在子线程里跑
+        threading.Thread(target=do_ping, daemon=True).start()
+
+    def _add_device_from_broadcast(self, result):
+        """把广播发现的新设备加入列表"""
+        ip, name = result
+        # 去重
+        for i, (dip, _) in enumerate(self.devices):
+            if dip == ip:
+                self._reset_backoff()
+                return
+
+        self.devices.append((ip, name))
+        self.devices.sort(
+            key=lambda x: tuple(int(p) for p in x[0].split('.')))
+        # 选中新加入的设备
+        for i, (dip, _) in enumerate(self.devices):
+            if dip == ip:
+                self.current_index = i
+                break
+
+        self._reset_backoff()
+        self._update_status()
+        self.send_btn.setEnabled(
+            self.current_ip is not None
+            and bool(self.input.text().strip()))
+        if self.device_panel.isVisible():
+            self.device_panel.refresh(self.devices, self.current_index)
 
     # ---------- 面板 ----------
     def setup_panels(self):
@@ -1059,6 +1208,13 @@ class MainWindow(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
 
+    # ---------- 方案 C：窗口激活触发扫描 ----------
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 窗口从托盘/隐藏状态重新显示时，如果未连接，立即扫描
+        if not self.current_ip and not self._quitting:
+            QTimer.singleShot(50, self._trigger_immediate_scan)
+
     # ---------- 剪贴板 ----------
     def setup_clipboard(self):
         self._clip_timer = QTimer(self)
@@ -1093,6 +1249,10 @@ class MainWindow(QWidget):
             self.history.add(text, title)
             if self.history_panel.isVisible():
                 self.history_panel.refresh()
+
+            # 方案 C：复制链接时立即扫描
+            if not self.current_ip and not self._discovering:
+                self._trigger_immediate_scan()
 
     # ---------- 托盘 ----------
     def setup_tray(self):
@@ -1179,6 +1339,12 @@ class MainWindow(QWidget):
 
     def quit_app(self):
         self._quitting = True
+        # 停止广播监听线程
+        try:
+            self._broadcast_listener.stop()
+            self._broadcast_listener.wait(1000)
+        except Exception:
+            pass
         self.tray.hide()
         QApplication.quit()
 
@@ -1237,7 +1403,6 @@ class MainWindow(QWidget):
                 if not ping_phone(ip, timeout=HEARTBEAT_TIMEOUT):
                     offline.append(ip)
             if offline:
-                # ★ 用 Signal 跨线程投递（线程安全的）
                 self.devices_offline_signal.emit(offline)
 
         threading.Thread(target=do_ping_all, daemon=True).start()
@@ -1272,7 +1437,7 @@ class MainWindow(QWidget):
                     self.devices, self.current_index)
 
             if not self.devices:
-                self._scan_backoff = SCAN_BACKOFF_INITIAL
+                self._reset_backoff()
                 self._schedule_scan(2000)
 
     # ---------- 扫描 ----------
@@ -1308,9 +1473,8 @@ class MainWindow(QWidget):
             if not self._scan_silent:
                 self._update_status()
             if not self.devices:
-                self._scan_backoff = min(
-                    self._scan_backoff * 2, SCAN_BACKOFF_MAX)
-                self._schedule_scan(self._scan_backoff * 1000)
+                self._advance_backoff()
+                self._schedule_scan(self._current_backoff_seconds() * 1000)
 
     @Slot(list, int)
     def on_discovery_finished(self, ips, worker_id):
@@ -1348,11 +1512,10 @@ class MainWindow(QWidget):
             self.device_panel.refresh(self.devices, self.current_index)
 
         if self.devices:
-            self._scan_backoff = SCAN_BACKOFF_INITIAL
+            self._reset_backoff()
         else:
-            self._scan_backoff = min(
-                self._scan_backoff * 2, SCAN_BACKOFF_MAX)
-            self._schedule_scan(self._scan_backoff * 1000)
+            self._advance_backoff()
+            self._schedule_scan(self._current_backoff_seconds() * 1000)
 
     def _update_status(self):
         c = ThemeManager.colors()
@@ -1439,7 +1602,6 @@ class MainWindow(QWidget):
         self.input.clear()
         self.send_btn.setEnabled(False)
 
-        # 兜底：网络库卡住时强制恢复按钮
         self._send_guard_timer.start((SEND_TIMEOUT + 2) * 1000)
 
         def do_send():
@@ -1447,13 +1609,11 @@ class MainWindow(QWidget):
                 result = send_to_phone(ip, text)
             except Exception as e:
                 result = {"ok": False, "message": str(e)}
-            # ★ 用 Signal 跨线程投递
             self.send_result_signal.emit(ip, text, result)
 
         threading.Thread(target=do_send, daemon=True).start()
 
     def _recover_send_btn(self):
-        """发送超时兜底：强制恢复按钮可用"""
         if not self.send_btn.isEnabled():
             self.send_btn.setEnabled(
                 self.current_ip is not None
@@ -1480,7 +1640,6 @@ class MainWindow(QWidget):
         else:
             self._flash("失败", "#FF3B30")
 
-        # 恢复按钮（发送失败后允许重试）
         self.send_btn.setEnabled(
             self.current_ip is not None
             and bool(self.input.text().strip()))
