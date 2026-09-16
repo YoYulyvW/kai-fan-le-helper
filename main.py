@@ -38,9 +38,10 @@ from PySide2.QtWidgets import (
 PORT = 8848
 SCAN_TIMEOUT = 0.5
 SCAN_MAX_WORKERS = 80
-HEARTBEAT_INTERVAL = 15
+HEARTBEAT_INTERVAL = 6      # 心跳间隔（秒）—— 从 15 缩短到 6
+HEARTBEAT_TIMEOUT = 1.5     # 单次 ping 超时
 CLIPBOARD_DEBOUNCE = 400
-SEND_TIMEOUT = 8
+SEND_TIMEOUT = 4            # 发送超时 —— 从 8 缩短到 4
 MAX_HISTORY = 50
 
 # 扫描退避（秒）
@@ -51,17 +52,20 @@ SCAN_BACKOFF_MAX = 60
 WIN_WIDTH = 380
 WIN_HEIGHT = 44
 
-# 输入框宽度（约 10 个汉字 + padding）
 INPUT_WIDTH = 150
-
-# 状态区宽度范围
 STATUS_MIN_W = 56
 STATUS_MAX_W = 110
 
-# 历史记录文件
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
 )
+
+# 连接类错误关键词（手机 App 退到后台、端口关闭时出现）
+CONN_ERROR_KEYWORDS = [
+    "connection", "refused", "timed out", "timeout",
+    "unreachable", "reset", "aborted", "broken pipe",
+    "10061", "10060", "10054", "10053"
+]
 
 
 # ============================================================
@@ -82,7 +86,6 @@ _FILE_EXT_PATTERN = re.compile(
 
 
 def is_noise_clipboard(text):
-    """判断剪贴板内容是否应该被忽略（本地文件路径、纯文件等）"""
     if not text:
         return True
     s = text.strip()
@@ -413,7 +416,7 @@ def scan_network(port=PORT):
     return found
 
 
-def ping_phone(ip, port=PORT, timeout=2):
+def ping_phone(ip, port=PORT, timeout=HEARTBEAT_TIMEOUT):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -813,7 +816,6 @@ class MainWindow(QWidget):
         self.container.setAttribute(Qt.WA_StyledBackground, True)
         self.container.setGeometry(0, 0, WIN_WIDTH, WIN_HEIGHT)
 
-        # 状态区：两行显示，宽度动态自适应
         self.status_box = QWidget()
         self.status_box.setFixedWidth(STATUS_MIN_W)
         self.status_box.setCursor(Qt.PointingHandCursor)
@@ -835,19 +837,16 @@ class MainWindow(QWidget):
         svb.addWidget(self.status_line1)
         svb.addWidget(self.status_line2)
 
-        # 输入框
         self.input = QLineEdit()
         self.input.setPlaceholderText("等待剪贴板...")
         self.input.setFixedHeight(28)
         self.input.setFixedWidth(INPUT_WIDTH)
         self.input.returnPressed.connect(self.on_send)
 
-        # 历史按钮
         self.history_btn = QPushButton("📋")
         self.history_btn.setFixedSize(28, 28)
         self.history_btn.clicked.connect(self.toggle_history)
 
-        # 发送按钮
         self.send_btn = QPushButton("发送")
         self.send_btn.setFixedSize(48, 28)
         self.send_btn.setStyleSheet("""
@@ -863,7 +862,6 @@ class MainWindow(QWidget):
         self.send_btn.clicked.connect(self.on_send)
         self.send_btn.setEnabled(False)
 
-        # 关闭按钮
         self.close_btn = QPushButton("✕")
         self.close_btn.setFixedSize(22, 22)
         self.close_btn.clicked.connect(self.hide)
@@ -1163,29 +1161,57 @@ class MainWindow(QWidget):
             return
         self.start_discovery(silent=False)
 
+    # ---------- 心跳（检测所有设备）----------
     def on_heartbeat(self):
-        ip = self.current_ip
-        if not ip:
+        if not self.devices:
             return
 
-        def do_ping():
-            ok = ping_phone(ip)
-            if not ok:
-                QTimer.singleShot(0, lambda: self._on_device_offline(ip))
-        threading.Thread(target=do_ping, daemon=True).start()
+        # 快照，避免线程中访问 self.devices 时被主线程修改
+        snapshot = list(self.devices)
 
-    def _on_device_offline(self, ip):
+        def do_ping_all():
+            offline = []
+            for ip, _ in snapshot:
+                if not ping_phone(ip, timeout=HEARTBEAT_TIMEOUT):
+                    offline.append(ip)
+            if offline:
+                QTimer.singleShot(
+                    0, lambda: self._on_devices_offline(offline))
+
+        threading.Thread(target=do_ping_all, daemon=True).start()
+
+    def _on_devices_offline(self, ips):
+        """批量移除掉线设备，如果全部掉线则触发快速重扫"""
+        if not ips:
+            return
+        ips_set = set(ips)
         old_len = len(self.devices)
-        self.devices = [d for d in self.devices if d[0] != ip]
+        removed_any = any(d[0] in ips_set for d in self.devices)
+
+        if not removed_any:
+            return
+
+        # 记录当前设备是否被移除
+        current_removed = (self.current_ip in ips_set) if self.current_ip else False
+
+        self.devices = [d for d in self.devices if d[0] not in ips_set]
+
         if len(self.devices) != old_len:
             if self.current_index >= len(self.devices):
                 self.current_index = max(0, len(self.devices) - 1)
+            elif current_removed:
+                self.current_index = 0
+
             self._update_status()
             self.send_btn.setEnabled(
-                self.current_ip is not None and bool(self.input.text().strip()))
-            if self.device_panel.isVisible():
-                self.device_panel.refresh(self.devices, self.current_index)
+                self.current_ip is not None
+                and bool(self.input.text().strip()))
 
+            if self.device_panel.isVisible():
+                self.device_panel.refresh(
+                    self.devices, self.current_index)
+
+            # 全部掉线 → 2 秒后快速重扫
             if not self.devices:
                 self._scan_backoff = SCAN_BACKOFF_INITIAL
                 self._schedule_scan(2000)
@@ -1295,7 +1321,6 @@ class MainWindow(QWidget):
         else:
             line1 = f"已连接 ({n})"
 
-        # 手机名过长时省略（按最大宽度计算）
         fm2 = QFontMetrics(self.status_line2.font())
         elided = fm2.elidedText(name, Qt.ElideRight, STATUS_MAX_W - 4)
 
@@ -1311,7 +1336,6 @@ class MainWindow(QWidget):
         self.status_box.setToolTip(tip)
 
     def _fit_status_width(self):
-        """根据两行文本内容自适应状态区宽度（限制在 MIN~MAX 之间）"""
         fm1 = QFontMetrics(self.status_line1.font())
         fm2 = QFontMetrics(self.status_line2.font())
         w1 = fm1.horizontalAdvance(self.status_line1.text())
@@ -1331,7 +1355,6 @@ class MainWindow(QWidget):
         if color is None:
             color = ThemeManager.colors()['text_sub']
         self.status_line2.setText(text)
-        # 字号与第一行一致，都是 11px
         self.status_line2.setStyleSheet(
             f"color: {color}; font-size: 11px; background: transparent;"
         )
@@ -1358,11 +1381,12 @@ class MainWindow(QWidget):
                 result = send_to_phone(ip, text)
             except Exception as e:
                 result = {"ok": False, "message": str(e)}
-            QTimer.singleShot(0, lambda: self._on_send_result(text, result))
+            QTimer.singleShot(
+                0, lambda: self._on_send_result(ip, text, result))
 
         threading.Thread(target=do_send, daemon=True).start()
 
-    def _on_send_result(self, sent_text, result):
+    def _on_send_result(self, ip, sent_text, result):
         try:
             ok = bool(result.get("ok"))
         except Exception:
@@ -1370,6 +1394,16 @@ class MainWindow(QWidget):
 
         if ok:
             self._flash("已发送", "#34C759")
+            return
+
+        # 判断是否为连接类错误（手机 App 退到后台、端口关闭）
+        msg = str(result.get("message", "")).lower()
+        is_conn_error = any(k in msg for k in CONN_ERROR_KEYWORDS)
+
+        if is_conn_error and ip:
+            # 立即移除该设备并触发重扫
+            self._flash("连接已断开", "#FF3B30")
+            self._on_devices_offline([ip])
         else:
             self._flash("失败", "#FF3B30")
 
