@@ -48,6 +48,8 @@ INPUT_WIDTH = 150
 STATUS_MIN_W = 56
 STATUS_MAX_W = 110
 
+THEME_POLL_INTERVAL = 2000  # 每 2 秒检测一次系统主题（毫秒）
+
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
 )
@@ -58,7 +60,6 @@ CONN_ERROR_KEYWORDS = [
     "10061", "10060", "10054", "10053"
 ]
 
-# 抖音分享文本特征（必须命中其中之一，才做解析）
 DOUYIN_HINTS = [
     "v.douyin.com",
     "douyin.com",
@@ -91,7 +92,6 @@ _FILE_EXT_PATTERN = re.compile(
 
 
 def is_noise_clipboard(text):
-    """本地文件路径、纯文件等无关内容"""
     if not text:
         return True
     s = text.strip()
@@ -111,7 +111,6 @@ def is_noise_clipboard(text):
 
 
 def looks_like_douyin_share(text):
-    """判断文本是否像抖音分享（含域名或固定前缀词）"""
     if not text:
         return False
     s = text.lower()
@@ -159,7 +158,7 @@ class ThemeManager:
         if mode == "dark":
             return {
                 "bg":           "rgba(28, 28, 30, 0.97)",
-                "bg_solid":     "rgba(28, 28, 30, 0.99)",
+                "bg_solid":     "#1c1c1e",               # 纯色
                 "border":       "rgba(255, 255, 255, 0.14)",
                 "text":         "#FFFFFF",
                 "text_sub":     "#8E8E93",
@@ -178,7 +177,7 @@ class ThemeManager:
         else:
             return {
                 "bg":           "rgba(255, 255, 255, 0.98)",
-                "bg_solid":     "rgba(255, 255, 255, 0.995)",
+                "bg_solid":     "#f2f2f2",               # 纯色
                 "border":       "rgba(0, 0, 0, 0.10)",
                 "text":         "#1C1C1E",
                 "text_sub":     "#6E6E73",
@@ -516,6 +515,7 @@ class DevicePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
         self.setFixedWidth(WIN_WIDTH)
         self.devices = []
         self.current_index = 0
@@ -532,6 +532,8 @@ class DevicePanel(QWidget):
 
         self.list = QListWidget()
         self.list.setFrameShape(QFrame.NoFrame)
+        self.list.setAutoFillBackground(False)
+        self.list.viewport().setAutoFillBackground(False)
         self.list.itemDoubleClicked.connect(self._on_double_click)
 
         self.close_btn = QPushButton("关闭")
@@ -554,11 +556,17 @@ class DevicePanel(QWidget):
 
         self._relayout()
 
+    def showEvent(self, event):
+        # 每次显示时刷新主题，防止主题切换后不更新
+        self.apply_theme()
+        super().showEvent(event)
+
     def apply_theme(self):
         c = ThemeManager.colors()
+        # 用纯色 bg_solid，避免 Qt.Popup 下 rgba 渲染异常
         self.container.setStyleSheet(f"""
             #container {{
-                background: {c['bg']};
+                background: {c['bg_solid']};
                 border-radius: 12px;
                 border: 1px solid {c['border']};
             }}
@@ -643,7 +651,8 @@ class HistoryPanel(QWidget):
     def __init__(self, history, parent=None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedWidth(WIN_WIDTH)          # ← 与主 UI 一致
+        self.setAutoFillBackground(False)
+        self.setFixedWidth(WIN_WIDTH)
         self.history = history
         self._build()
         self.apply_theme()
@@ -658,6 +667,8 @@ class HistoryPanel(QWidget):
 
         self.list = QListWidget()
         self.list.setFrameShape(QFrame.NoFrame)
+        self.list.setAutoFillBackground(False)
+        self.list.viewport().setAutoFillBackground(False)
         self.list.itemDoubleClicked.connect(self._on_double_click)
 
         self.clear_btn = QPushButton("清空")
@@ -686,11 +697,17 @@ class HistoryPanel(QWidget):
         self.container.setLayout(layout)
         self.container.setGeometry(0, 0, WIN_WIDTH, 320)
 
+    def showEvent(self, event):
+        # 每次显示时刷新主题，防止主题切换后不更新
+        self.apply_theme()
+        super().showEvent(event)
+
     def apply_theme(self):
         c = ThemeManager.colors()
+        # 用纯色 bg_solid，避免 Qt.Popup 下 rgba 渲染异常
         self.container.setStyleSheet(f"""
             #container {{
-                background: {c['bg']};
+                background: {c['bg_solid']};
                 border-radius: 12px;
                 border: 1px solid {c['border']};
             }}
@@ -1053,11 +1070,8 @@ class MainWindow(QWidget):
             return
         self.last_clipboard = text
 
-        # 过滤 1：本地文件路径
         if is_noise_clipboard(text):
             return
-
-        # 过滤 2：不是抖音分享的普通文本直接忽略
         if not looks_like_douyin_share(text):
             return
 
@@ -1175,6 +1189,20 @@ class MainWindow(QWidget):
         self._scan_timer = QTimer(self)
         self._scan_timer.setSingleShot(True)
         self._scan_timer.timeout.connect(self._run_scheduled_scan)
+
+        # 系统主题轮询：跟随系统主题变化
+        self._theme_poll_timer = QTimer(self)
+        self._theme_poll_timer.timeout.connect(self._poll_system_theme)
+        self._theme_poll_timer.start(THEME_POLL_INTERVAL)
+
+    def _poll_system_theme(self):
+        if ThemeManager.mode != "auto":
+            return
+        old = ThemeManager.current
+        new = ThemeManager.detect_system()
+        if new != old:
+            ThemeManager.current = new
+            self.apply_theme()
 
     def _schedule_scan(self, delay_ms):
         if self._quitting:
