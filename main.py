@@ -23,7 +23,7 @@ from PySide2.QtGui import (
 from PySide2.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
     QSystemTrayIcon, QMenu, QAction, QLineEdit, QListWidget, QListWidgetItem,
-    QSizePolicy
+    QSizePolicy, QFrame
 )
 
 # ============================================================
@@ -58,9 +58,23 @@ CONN_ERROR_KEYWORDS = [
     "10061", "10060", "10054", "10053"
 ]
 
+# 抖音分享文本特征（必须命中其中之一，才做解析）
+DOUYIN_HINTS = [
+    "v.douyin.com",
+    "douyin.com",
+    "iesdouyin.com",
+    "复制打开抖音",
+    "复制此链接，打开dou音",
+    "复制此链接，打开抖音",
+    "打开dou音搜索",
+    "打开抖音搜索",
+    "抖音搜索",
+    "dou音搜索",
+]
+
 
 # ============================================================
-# 剪贴板垃圾过滤
+# 剪贴板过滤
 # ============================================================
 _FILE_EXT_PATTERN = re.compile(
     r'\.(apk|exe|zip|rar|7z|tar|gz|bz2|xz|'
@@ -77,6 +91,7 @@ _FILE_EXT_PATTERN = re.compile(
 
 
 def is_noise_clipboard(text):
+    """本地文件路径、纯文件等无关内容"""
     if not text:
         return True
     s = text.strip()
@@ -92,6 +107,17 @@ def is_noise_clipboard(text):
         return True
     if ' ' not in s and '\n' not in s and _FILE_EXT_PATTERN.search(s):
         return True
+    return False
+
+
+def looks_like_douyin_share(text):
+    """判断文本是否像抖音分享（含域名或固定前缀词）"""
+    if not text:
+        return False
+    s = text.lower()
+    for h in DOUYIN_HINTS:
+        if h.lower() in s:
+            return True
     return False
 
 
@@ -490,7 +516,7 @@ class DevicePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedWidth(360)
+        self.setFixedWidth(WIN_WIDTH)
         self.devices = []
         self.current_index = 0
         self._build()
@@ -505,6 +531,7 @@ class DevicePanel(QWidget):
         self.title.setObjectName("title")
 
         self.list = QListWidget()
+        self.list.setFrameShape(QFrame.NoFrame)
         self.list.itemDoubleClicked.connect(self._on_double_click)
 
         self.close_btn = QPushButton("关闭")
@@ -531,7 +558,7 @@ class DevicePanel(QWidget):
         c = ThemeManager.colors()
         self.container.setStyleSheet(f"""
             #container {{
-                background: {c['bg_solid']};
+                background: {c['bg']};
                 border-radius: 12px;
                 border: 1px solid {c['border']};
             }}
@@ -616,7 +643,7 @@ class HistoryPanel(QWidget):
     def __init__(self, history, parent=None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedWidth(520)
+        self.setFixedWidth(WIN_WIDTH)          # ← 与主 UI 一致
         self.history = history
         self._build()
         self.apply_theme()
@@ -630,6 +657,7 @@ class HistoryPanel(QWidget):
         self.title.setObjectName("title")
 
         self.list = QListWidget()
+        self.list.setFrameShape(QFrame.NoFrame)
         self.list.itemDoubleClicked.connect(self._on_double_click)
 
         self.clear_btn = QPushButton("清空")
@@ -656,13 +684,13 @@ class HistoryPanel(QWidget):
         layout.addWidget(self.list, 1)
         layout.addLayout(bottom)
         self.container.setLayout(layout)
-        self.container.setGeometry(0, 0, 520, 320)
+        self.container.setGeometry(0, 0, WIN_WIDTH, 320)
 
     def apply_theme(self):
         c = ThemeManager.colors()
         self.container.setStyleSheet(f"""
             #container {{
-                background: {c['bg_solid']};
+                background: {c['bg']};
                 border-radius: 12px;
                 border: 1px solid {c['border']};
             }}
@@ -821,10 +849,8 @@ class MainWindow(QWidget):
         self.status_line2.setFixedHeight(14)
         self.status_line2.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.status_line2.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        # 初始隐藏，未连接时单行
         self.status_line2.setVisible(False)
 
-        # 上下加 stretch，让单行时第一行垂直居中
         svb = QVBoxLayout(self.status_box)
         svb.setContentsMargins(0, 0, 0, 0)
         svb.setSpacing(0)
@@ -1027,7 +1053,12 @@ class MainWindow(QWidget):
             return
         self.last_clipboard = text
 
+        # 过滤 1：本地文件路径
         if is_noise_clipboard(text):
+            return
+
+        # 过滤 2：不是抖音分享的普通文本直接忽略
+        if not looks_like_douyin_share(text):
             return
 
         title, is_fast = TitleParser.parse(text)
@@ -1317,7 +1348,7 @@ class MainWindow(QWidget):
 
         self.set_line1(f"● {line1}", "#34C759")
         self.set_line2(elided)
-        self.status_line2.setVisible(True)   # ← 连接成功才显示第二行
+        self.status_line2.setVisible(True)
         self._fit_status_width()
 
         tip = f"{name}\nIP: {self.current_ip}"
@@ -1402,7 +1433,7 @@ class MainWindow(QWidget):
 
     def _flash(self, text, color):
         self.set_line1(f"● {text}", color)
-        self.status_line2.setVisible(False)  # flash 时单行
+        self.status_line2.setVisible(False)
         self._fit_status_width()
         self._flash_timer.start(1500)
 
