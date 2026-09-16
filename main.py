@@ -23,7 +23,8 @@ from datetime import datetime
 
 from PySide2.QtCore import Qt, QTimer, QThread, Signal, Slot, QPoint
 from PySide2.QtGui import (
-    QIcon, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient
+    QIcon, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient,
+    QFontMetrics
 )
 from PySide2.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
@@ -40,7 +41,6 @@ SCAN_MAX_WORKERS = 80
 HEARTBEAT_INTERVAL = 15
 CLIPBOARD_DEBOUNCE = 400
 SEND_TIMEOUT = 8
-SEND_FALLBACK_MS = 12000
 MAX_HISTORY = 50
 
 # 扫描退避（秒）
@@ -48,8 +48,11 @@ SCAN_BACKOFF_INITIAL = 10
 SCAN_BACKOFF_MAX = 60
 
 # 窗口尺寸
-WIN_WIDTH = 500
+WIN_WIDTH = 510
 WIN_HEIGHT = 48
+
+# 输入框宽度（约 10 个汉字 + padding）
+INPUT_WIDTH = 150
 
 # 历史记录文件
 HISTORY_FILE = os.path.join(
@@ -222,13 +225,11 @@ class TitleParser:
         before = parts[0].strip()
         tags = [p.strip() for p in parts[1:]]
 
-        # 优先取 # 前面的文本（如「道心无尘# AI漫剧」）
         if before and before not in CATEGORY_TAGS:
             cleaned = TitleParser._clean(before)
             if cleaned:
                 return cleaned
 
-        # 从 # 后面的标签中找第一个非分类标签，并清理噪声
         for tag in tags:
             if not tag:
                 continue
@@ -238,7 +239,6 @@ class TitleParser:
             if cleaned:
                 return cleaned
 
-        # 兜底：返回 # 前文本
         if before:
             cleaned = TitleParser._clean(before)
             if cleaned:
@@ -249,19 +249,14 @@ class TitleParser:
     def _is_noise(tok):
         if not tok:
             return True
-        # 纯数字 / 小数 如 6.92、1
         if all(c.isdigit() or c == '.' for c in tok):
             return True
-        # 日期 mm/dd 如 04/02
         if re.match(r'^\d{1,2}/\d{1,2}$', tok):
             return True
-        # 时间 :5pm / 5pm / :12am
         if re.match(r'^:?\d{1,2}(am|pm|AM|PM)$', tok):
             return True
-        # @用户名 如 U@l.PK、l@C.uf、x@F.ho
         if '@' in tok and re.match(r'^[A-Za-z]?@[A-Za-z0-9._]+$', tok):
             return True
-        # 冒号斜杠结尾的乱码 如 Wzt:/、qeO:/、fba:/、KWM:/、TlC:/
         if re.match(r'^[A-Za-z]{1,5}:?/?$', tok):
             return True
         return False
@@ -732,7 +727,6 @@ class MainWindow(QWidget):
         self._discovering = False
         self._scan_silent = False
         self._quitting = False
-        self._send_fallback = None
         self._scan_hard_timeout = None
 
         # 扫描退避 / worker 代次
@@ -790,20 +784,25 @@ class MainWindow(QWidget):
 
         # 状态文字（可点击）
         self.status_text = QLabel("扫描中")
-        self.status_text.setMinimumWidth(64)
-        self.status_text.setMaximumWidth(110)
-        self.status_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.status_text.setFixedWidth(80)
         self.status_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.status_text.setCursor(Qt.PointingHandCursor)
         self.status_text.mousePressEvent = self._on_status_clicked
 
-        # 输入框
+        # 输入框：固定 150px（≈ 10 个汉字 + padding）
         self.input = QLineEdit()
         self.input.setPlaceholderText("等待剪贴板...")
         self.input.setFixedHeight(32)
-        self.input.setMinimumWidth(160)
-        self.input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.input.setFixedWidth(INPUT_WIDTH)
         self.input.returnPressed.connect(self.on_send)
+
+        # 手机名：自适应，最多 110px，超长自动省略
+        self.device_name_label = QLabel("")
+        self.device_name_label.setMinimumWidth(40)
+        self.device_name_label.setMaximumWidth(110)
+        self.device_name_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.device_name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         # 历史按钮
         self.history_btn = QPushButton("📋")
@@ -836,7 +835,8 @@ class MainWindow(QWidget):
         row.setSpacing(4)
         row.addWidget(self.status_dot)
         row.addWidget(self.status_text)
-        row.addWidget(self.input, 1)
+        row.addWidget(self.input)
+        row.addWidget(self.device_name_label)
         row.addWidget(self.history_btn)
         row.addWidget(self.send_btn)
         row.addWidget(self.close_btn)
@@ -865,6 +865,11 @@ class MainWindow(QWidget):
                 background: {c['input_focus']};
             }}
         """)
+
+        # 手机名颜色跟随主题
+        self.device_name_label.setStyleSheet(
+            f"color: {c['text_sub']}; font-size: 11px; background: transparent;"
+        )
 
         self._update_status()
 
@@ -916,7 +921,6 @@ class MainWindow(QWidget):
     def _trigger_immediate_scan(self):
         if self._quitting:
             return
-        # 取消所有排队的延迟扫描
         if hasattr(self, '_scan_timer'):
             self._scan_timer.stop()
         self._scan_backoff = SCAN_BACKOFF_INITIAL
@@ -1004,7 +1008,6 @@ class MainWindow(QWidget):
             self.input.setText(display)
             self.send_btn.setEnabled(self.current_ip is not None)
 
-            # 复制成功即写入历史（用原始文本，回填时可重新解析）
             self.history.add(text, title)
             if self.history_panel.isVisible():
                 self.history_panel.refresh()
@@ -1106,12 +1109,10 @@ class MainWindow(QWidget):
 
     # ---------- 定时器 ----------
     def setup_timers(self):
-        # 心跳
         self._hb_timer = QTimer(self)
         self._hb_timer.timeout.connect(self.on_heartbeat)
         self._hb_timer.start(HEARTBEAT_INTERVAL * 1000)
 
-        # 延迟扫描（可取消）
         self._scan_timer = QTimer(self)
         self._scan_timer.setSingleShot(True)
         self._scan_timer.timeout.connect(self._run_scheduled_scan)
@@ -1124,7 +1125,6 @@ class MainWindow(QWidget):
     def _run_scheduled_scan(self):
         if self._quitting:
             return
-        # 已有连接 → 交给心跳，不再扫描
         if self.current_ip:
             return
         self.start_discovery(silent=False)
@@ -1152,7 +1152,6 @@ class MainWindow(QWidget):
             if self.device_panel.isVisible():
                 self.device_panel.refresh(self.devices, self.current_index)
 
-            # 全部掉线 → 2 秒后快速重扫
             if not self.devices:
                 self._scan_backoff = SCAN_BACKOFF_INITIAL
                 self._schedule_scan(2000)
@@ -1170,7 +1169,6 @@ class MainWindow(QWidget):
             self.set_status_text("扫描中", "#FF9500")
             self.send_btn.setEnabled(False)
 
-        # 硬超时保护
         if self._scan_hard_timeout is not None:
             self._scan_hard_timeout.stop()
         self._scan_hard_timeout = QTimer(self)
@@ -1185,11 +1183,9 @@ class MainWindow(QWidget):
     def _force_reset_scan(self):
         if self._discovering:
             self._discovering = False
-            # 作废本次 worker，避免过期回调污染
             self._scan_id += 1
             if not self._scan_silent:
                 self._update_status()
-            # 没设备就退避重试
             if not self.devices:
                 self._scan_backoff = min(
                     self._scan_backoff * 2, SCAN_BACKOFF_MAX)
@@ -1197,7 +1193,6 @@ class MainWindow(QWidget):
 
     @Slot(list, int)
     def on_discovery_finished(self, ips, worker_id):
-        # 过期 worker 直接丢弃
         if worker_id != self._scan_id:
             return
 
@@ -1212,7 +1207,6 @@ class MainWindow(QWidget):
         old_current_ip = self.current_ip
         self.devices = ips
 
-        # 保持当前设备不变
         if old_current_ip:
             for i, (ip, _) in enumerate(self.devices):
                 if ip == old_current_ip:
@@ -1232,7 +1226,6 @@ class MainWindow(QWidget):
         if self.device_panel.isVisible():
             self.device_panel.refresh(self.devices, self.current_index)
 
-        # 找到即停；没找到 → 指数退避重扫
         if self.devices:
             self._scan_backoff = SCAN_BACKOFF_INITIAL
         else:
@@ -1241,10 +1234,11 @@ class MainWindow(QWidget):
             self._schedule_scan(self._scan_backoff * 1000)
 
     def _update_status(self):
-        # 扫描中优先显示
         if self._discovering:
             self.set_status_text("扫描中", "#FF9500")
             self.status_text.setToolTip("正在扫描局域网...")
+            self.device_name_label.setText("")
+            self.device_name_label.setToolTip("")
             return
 
         n = len(self.devices)
@@ -1252,14 +1246,23 @@ class MainWindow(QWidget):
             self.set_status_text("未找到", "#FF3B30")
             self.status_text.setToolTip(
                 "未发现局域网内的手机\n点击立即重新扫描")
+            self.device_name_label.setText("")
+            self.device_name_label.setToolTip("")
             return
 
         if n == 1:
             display = "已连接"
         else:
-            display = f"已连接 ({n}台)"
+            display = f"已连接({n})"
 
         name = self.current_name or "手机"
+        # 手机名过长时省略
+        fm = QFontMetrics(self.device_name_label.font())
+        max_w = self.device_name_label.maximumWidth() - 4
+        elided = fm.elidedText(name, Qt.ElideRight, max_w)
+        self.device_name_label.setText(elided)
+        self.device_name_label.setToolTip(f"{name}\nIP: {self.current_ip}")
+
         tip = f"{name}\nIP: {self.current_ip}"
         if n > 1:
             tip += f"\n\n共 {n} 台设备在线\n点击切换"
@@ -1293,15 +1296,9 @@ class MainWindow(QWidget):
             self._flash("未连接", "#FF3B30")
             return
 
+        # 立即清空输入框并刷新按钮状态，不等网络结果
+        self.input.clear()
         self.send_btn.setEnabled(False)
-        self.send_btn.setText("...")
-
-        if self._send_fallback is not None:
-            self._send_fallback.stop()
-        self._send_fallback = QTimer(self)
-        self._send_fallback.setSingleShot(True)
-        self._send_fallback.timeout.connect(self._force_recover_button)
-        self._send_fallback.start(SEND_FALLBACK_MS)
 
         def do_send():
             try:
@@ -1312,19 +1309,7 @@ class MainWindow(QWidget):
 
         threading.Thread(target=do_send, daemon=True).start()
 
-    def _force_recover_button(self):
-        if self.send_btn.text() == "...":
-            self.send_btn.setEnabled(self.current_ip is not None)
-            self.send_btn.setText("发送")
-
     def _on_send_result(self, sent_text, result):
-        if self._send_fallback is not None:
-            self._send_fallback.stop()
-            self._send_fallback = None
-
-        self.send_btn.setEnabled(True)
-        self.send_btn.setText("发送")
-
         try:
             ok = bool(result.get("ok"))
         except Exception:
@@ -1332,7 +1317,6 @@ class MainWindow(QWidget):
 
         if ok:
             self._flash("已发送", "#34C759")
-            self.input.clear()
         else:
             self._flash("失败", "#FF3B30")
 
