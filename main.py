@@ -4,7 +4,7 @@
 开饭了助手 - Windows 置顶工具
 - 方案 C：复制链接 / 窗口激活时触发扫描
 - 方案 D：监听手机端 UDP 广播，毫秒级发现
-- 首次启动自动提权 + netsh 静默写入防火墙规则
+- 防火墙规则由 init_firewall.bat 一次性配置
 """
 
 import sys
@@ -12,8 +12,6 @@ import os
 import re
 import json
 import socket
-import ctypes
-import subprocess
 import threading
 import urllib.request
 import urllib.error
@@ -59,8 +57,6 @@ HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
 )
 
-FW_RULE_NAME = "KaiFanLeHelper"
-
 CONN_ERROR_KEYWORDS = [
     "connection", "refused", "timed out", "timeout",
     "unreachable", "reset", "aborted", "broken pipe",
@@ -79,103 +75,6 @@ DOUYIN_HINTS = [
     "抖音搜索",
     "dou音搜索",
 ]
-
-
-# ============================================================
-# 防火墙自动配置（首次启动提权一次，之后完全静默）
-# ============================================================
-def _no_window_flags():
-    """隐藏子进程黑框"""
-    return getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-
-
-def is_admin():
-    """当前进程是否管理员"""
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
-        return False
-
-
-def firewall_rule_exists():
-    """查询两条规则是否都已存在"""
-    try:
-        for suffix in ("_UDP", "_TCP"):
-            r = subprocess.run(
-                ['netsh', 'advfirewall', 'firewall', 'show', 'rule',
-                 f'name={FW_RULE_NAME}{suffix}'],
-                capture_output=True, text=True, timeout=5,
-                creationflags=_no_window_flags()
-            )
-            if r.returncode != 0 or f'{FW_RULE_NAME}{suffix}' not in (r.stdout or ''):
-                return False
-        return True
-    except Exception:
-        return False
-
-
-def add_firewall_rule_silent():
-    """
-    静默写入防火墙规则。
-    ⚠️ 必须在管理员上下文中调用，否则 netsh 会返回"拒绝访问"。
-    """
-    cmds = [
-        # UDP 8849 入站（接收手机广播）
-        ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
-         f'name={FW_RULE_NAME}_UDP', 'dir=in', 'action=allow',
-         'protocol=UDP', f'localport={BROADCAST_PORT}'],
-        # TCP 8848 入站（供浏览器访问 App）
-        ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
-         f'name={FW_RULE_NAME}_TCP', 'dir=in', 'action=allow',
-         'protocol=TCP', f'localport={PORT}'],
-    ]
-    for cmd in cmds:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=10,
-                               creationflags=_no_window_flags())
-            if r.returncode != 0:
-                print(f"[Firewall] ❌ {' '.join(cmd)} 失败: {r.stderr.strip()}")
-            else:
-                print(f"[Firewall] ✅ {' '.join(cmd)}")
-        except Exception as e:
-            print(f"[Firewall] ❌ 异常: {e}")
-
-
-def self_elevate():
-    """用 UAC 重新以管理员身份启动自己，返回是否成功发起"""
-    try:
-        params = ' '.join(f'"{a}"' for a in sys.argv)
-        ret = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, params, None, 1
-        )
-        return ret > 32
-    except Exception:
-        return False
-
-
-def bootstrap_firewall():
-    """
-    启动引导：
-      - 规则已存在 → 静默通过，不提权
-      - 规则不存在 + 已是管理员 → netsh 静默写入
-      - 规则不存在 + 非管理员 → 提权重启自己（一次 UAC）
-    """
-    if firewall_rule_exists():
-        print("[Bootstrap] ✅ 防火墙规则已存在，跳过")
-        return
-
-    if is_admin():
-        print("[Bootstrap] 已是管理员，静默写入规则")
-        add_firewall_rule_silent()
-        return
-
-    print("[Bootstrap] 首次运行，需要管理员权限添加防火墙规则（只弹一次）")
-    if self_elevate():
-        # 新实例已启动，旧实例退出
-        sys.exit(0)
-    else:
-        print("[Bootstrap] ⚠️ 用户取消提权，继续运行（可能收不到手机广播）")
 
 
 # ============================================================
@@ -1370,10 +1269,6 @@ class MainWindow(QWidget):
 
         menu.addSeparator()
 
-        fw_action = QAction("修复网络权限（防火墙）", self)
-        fw_action.triggered.connect(self._on_fix_firewall)
-        menu.addAction(fw_action)
-
         theme_menu = menu.addMenu("主题")
 
         self.theme_auto_action = QAction("自动（跟随系统）", self, checkable=True)
@@ -1402,23 +1297,6 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
-
-    def _on_fix_firewall(self):
-        if firewall_rule_exists():
-            self._flash("权限正常", "#34C759")
-            return
-        if is_admin():
-            add_firewall_rule_silent()
-        else:
-            if self_elevate():
-                self._flash("已提权", "#34C759")
-                # 当前实例即将退出，不刷新了
-                QTimer.singleShot(800, QApplication.quit)
-                return
-        QTimer.singleShot(2000, lambda: self._flash(
-            "权限已加" if firewall_rule_exists() else "未授权",
-            "#34C759" if firewall_rule_exists() else "#FF3B30"
-        ))
 
     def _set_theme(self, mode):
         ThemeManager.mode = mode
@@ -1766,9 +1644,6 @@ class MainWindow(QWidget):
 # main
 # ============================================================
 def main():
-    # ✅ 启动引导：首次运行提权一次，写入规则；之后完全静默
-    bootstrap_firewall()
-
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
