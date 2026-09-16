@@ -2,12 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 开饭了助手 - Windows 置顶工具
-- 自动读取剪贴板
-- 发现局域网内所有运行"开饭了"的手机
-- 找到即停 + 退避重扫，未连接才持续扫描
-- 点击状态区可立即重扫
-- 支持切换目标设备 / 广播到所有设备
-- 主题跟随系统（Windows 10/11 自动检测，Win7 默认浅色）
 """
 
 import sys
@@ -38,17 +32,15 @@ from PySide2.QtWidgets import (
 PORT = 8848
 SCAN_TIMEOUT = 0.5
 SCAN_MAX_WORKERS = 80
-HEARTBEAT_INTERVAL = 6      # 心跳间隔（秒）—— 从 15 缩短到 6
-HEARTBEAT_TIMEOUT = 1.5     # 单次 ping 超时
+HEARTBEAT_INTERVAL = 6
+HEARTBEAT_TIMEOUT = 1.5
 CLIPBOARD_DEBOUNCE = 400
-SEND_TIMEOUT = 4            # 发送超时 —— 从 8 缩短到 4
+SEND_TIMEOUT = 4
 MAX_HISTORY = 50
 
-# 扫描退避（秒）
 SCAN_BACKOFF_INITIAL = 10
 SCAN_BACKOFF_MAX = 60
 
-# 窗口尺寸
 WIN_WIDTH = 380
 WIN_HEIGHT = 44
 
@@ -60,7 +52,6 @@ HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
 )
 
-# 连接类错误关键词（手机 App 退到后台、端口关闭时出现）
 CONN_ERROR_KEYWORDS = [
     "connection", "refused", "timed out", "timeout",
     "unreachable", "reset", "aborted", "broken pipe",
@@ -830,12 +821,17 @@ class MainWindow(QWidget):
         self.status_line2.setFixedHeight(14)
         self.status_line2.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.status_line2.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # 初始隐藏，未连接时单行
+        self.status_line2.setVisible(False)
 
+        # 上下加 stretch，让单行时第一行垂直居中
         svb = QVBoxLayout(self.status_box)
         svb.setContentsMargins(0, 0, 0, 0)
         svb.setSpacing(0)
+        svb.addStretch(1)
         svb.addWidget(self.status_line1)
         svb.addWidget(self.status_line2)
+        svb.addStretch(1)
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("等待剪贴板...")
@@ -1161,12 +1157,10 @@ class MainWindow(QWidget):
             return
         self.start_discovery(silent=False)
 
-    # ---------- 心跳（检测所有设备）----------
     def on_heartbeat(self):
         if not self.devices:
             return
 
-        # 快照，避免线程中访问 self.devices 时被主线程修改
         snapshot = list(self.devices)
 
         def do_ping_all():
@@ -1181,7 +1175,6 @@ class MainWindow(QWidget):
         threading.Thread(target=do_ping_all, daemon=True).start()
 
     def _on_devices_offline(self, ips):
-        """批量移除掉线设备，如果全部掉线则触发快速重扫"""
         if not ips:
             return
         ips_set = set(ips)
@@ -1191,7 +1184,6 @@ class MainWindow(QWidget):
         if not removed_any:
             return
 
-        # 记录当前设备是否被移除
         current_removed = (self.current_ip in ips_set) if self.current_ip else False
 
         self.devices = [d for d in self.devices if d[0] not in ips_set]
@@ -1211,7 +1203,6 @@ class MainWindow(QWidget):
                 self.device_panel.refresh(
                     self.devices, self.current_index)
 
-            # 全部掉线 → 2 秒后快速重扫
             if not self.devices:
                 self._scan_backoff = SCAN_BACKOFF_INITIAL
                 self._schedule_scan(2000)
@@ -1227,7 +1218,7 @@ class MainWindow(QWidget):
 
         if not silent and not self.current_ip:
             self.set_line1("● 扫描中", "#FF9500")
-            self.set_line2("")
+            self.status_line2.setVisible(False)
             self._fit_status_width()
             self.send_btn.setEnabled(False)
 
@@ -1300,7 +1291,7 @@ class MainWindow(QWidget):
 
         if self._discovering:
             self.set_line1("● 扫描中", "#FF9500")
-            self.set_line2("")
+            self.status_line2.setVisible(False)
             self._fit_status_width()
             self.status_box.setToolTip("正在扫描局域网...")
             return
@@ -1308,7 +1299,7 @@ class MainWindow(QWidget):
         n = len(self.devices)
         if n == 0:
             self.set_line1("● 未找到", "#FF3B30")
-            self.set_line2("")
+            self.status_line2.setVisible(False)
             self._fit_status_width()
             self.status_box.setToolTip(
                 "未发现局域网内的手机\n点击立即重新扫描")
@@ -1326,6 +1317,7 @@ class MainWindow(QWidget):
 
         self.set_line1(f"● {line1}", "#34C759")
         self.set_line2(elided)
+        self.status_line2.setVisible(True)   # ← 连接成功才显示第二行
         self._fit_status_width()
 
         tip = f"{name}\nIP: {self.current_ip}"
@@ -1337,10 +1329,13 @@ class MainWindow(QWidget):
 
     def _fit_status_width(self):
         fm1 = QFontMetrics(self.status_line1.font())
-        fm2 = QFontMetrics(self.status_line2.font())
         w1 = fm1.horizontalAdvance(self.status_line1.text())
-        w2 = fm2.horizontalAdvance(self.status_line2.text())
-        target = max(w1, w2) + 4
+        if self.status_line2.isVisible():
+            fm2 = QFontMetrics(self.status_line2.font())
+            w2 = fm2.horizontalAdvance(self.status_line2.text())
+            target = max(w1, w2) + 4
+        else:
+            target = w1 + 4
         target = max(STATUS_MIN_W, min(target, STATUS_MAX_W))
         if self.status_box.width() != target:
             self.status_box.setFixedWidth(target)
@@ -1396,12 +1391,10 @@ class MainWindow(QWidget):
             self._flash("已发送", "#34C759")
             return
 
-        # 判断是否为连接类错误（手机 App 退到后台、端口关闭）
         msg = str(result.get("message", "")).lower()
         is_conn_error = any(k in msg for k in CONN_ERROR_KEYWORDS)
 
         if is_conn_error and ip:
-            # 立即移除该设备并触发重扫
             self._flash("连接已断开", "#FF3B30")
             self._on_devices_offline([ip])
         else:
@@ -1409,7 +1402,7 @@ class MainWindow(QWidget):
 
     def _flash(self, text, color):
         self.set_line1(f"● {text}", color)
-        self.set_line2("")
+        self.status_line2.setVisible(False)  # flash 时单行
         self._fit_status_width()
         self._flash_timer.start(1500)
 
