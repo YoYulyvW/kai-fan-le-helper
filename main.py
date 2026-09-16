@@ -4,6 +4,7 @@
 开饭了助手 - Windows 置顶工具
 - 方案 C：复制链接 / 窗口激活时触发扫描
 - 方案 D：监听手机端 UDP 广播，毫秒级发现
+- 首次启动自动添加防火墙规则
 """
 
 import sys
@@ -11,6 +12,8 @@ import os
 import re
 import json
 import socket
+import ctypes
+import subprocess
 import threading
 import urllib.request
 import urllib.error
@@ -32,7 +35,7 @@ from PySide2.QtWidgets import (
 # 配置
 # ============================================================
 PORT = 8848
-BROADCAST_PORT = 8849          # 手机端 UDP 广播目标端口
+BROADCAST_PORT = 8849
 SCAN_TIMEOUT = 0.3
 SCAN_MAX_WORKERS = 128
 HEARTBEAT_INTERVAL = 6
@@ -41,7 +44,6 @@ CLIPBOARD_DEBOUNCE = 400
 SEND_TIMEOUT = 4
 MAX_HISTORY = 50
 
-# 扫描退避序列（秒）：前 30 秒高频，之后降频
 SCAN_BACKOFF_SEQUENCE = [5, 5, 5, 5, 5, 5, 10, 15, 30, 60]
 
 WIN_WIDTH = 380
@@ -56,6 +58,8 @@ THEME_POLL_INTERVAL = 2000
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
 )
+
+FIREWALL_RULE_NAME = "KaiFanLeHelper"
 
 CONN_ERROR_KEYWORDS = [
     "connection", "refused", "timed out", "timeout",
@@ -75,6 +79,79 @@ DOUYIN_HINTS = [
     "抖音搜索",
     "dou音搜索",
 ]
+
+
+# ============================================================
+# 防火墙自动配置
+# ============================================================
+def is_admin():
+    """当前进程是否以管理员身份运行"""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def firewall_rule_exists():
+    """查询规则是否已存在"""
+    try:
+        creation_flags = 0
+        if hasattr(subprocess, 'CREATE_NO_WINDOW'):
+            creation_flags = subprocess.CREATE_NO_WINDOW
+        r = subprocess.run(
+            ['netsh', 'advfirewall', 'firewall', 'show', 'rule',
+             f'name={FIREWALL_RULE_NAME}'],
+            capture_output=True, text=True, timeout=5,
+            creationflags=creation_flags
+        )
+        return r.returncode == 0 and FIREWALL_RULE_NAME in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def add_firewall_rule_with_uac():
+    """
+    用 UAC 提权运行 netsh 添加规则。
+    用户只需点一次「是」，Windows 会记住。
+    返回 True 表示已发出提权请求（不保证用户点了同意）
+    """
+    # 规则名无空格，避免命令行转义问题
+    cmd_params = (
+        f'/c netsh advfirewall firewall add rule '
+        f'name={FIREWALL_RULE_NAME}_UDP '
+        f'dir=in action=allow protocol=UDP localport={BROADCAST_PORT}'
+        f' & '
+        f'netsh advfirewall firewall add rule '
+        f'name={FIREWALL_RULE_NAME}_TCP '
+        f'dir=in action=allow protocol=TCP localport={PORT}'
+    )
+    try:
+        # SW_HIDE = 0，隐藏 cmd 窗口
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "cmd.exe", cmd_params, None, 0
+        )
+        # ShellExecuteW 返回值 > 32 表示成功发起
+        return ret > 32
+    except Exception:
+        return False
+
+
+def ensure_firewall_rule(silent=True):
+    """
+    确保防火墙规则存在。
+    - 已存在：直接返回 True，不弹任何窗口
+    - 不存在：弹一次 UAC（用户点「是」后规则生效）
+    """
+    if firewall_rule_exists():
+        return True
+    if silent:
+        print("[Firewall] 未检测到入站规则，尝试自动添加…")
+    ok = add_firewall_rule_with_uac()
+    if ok:
+        print("[Firewall] 已发起 UAC 提权，请在弹出的窗口点「是」")
+    else:
+        print("[Firewall] ⚠️ 提权失败，请手动添加或忽略（可能影响 UDP 发现）")
+    return ok
 
 
 # ============================================================
@@ -493,7 +570,7 @@ class BroadcastListener(QThread):
         {"magic": "KFL", "action": "hello", "port": 8848}
     源 IP 即为手机 IP。
     """
-    device_announced = Signal(str, int)   # ip, port
+    device_announced = Signal(str, int)
 
     def __init__(self, listen_port=BROADCAST_PORT):
         super().__init__()
@@ -516,12 +593,14 @@ class BroadcastListener(QThread):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             try:
                 sock.bind(('0.0.0.0', self.listen_port))
-            except Exception:
-                # 端口占用或被防火墙拦住
+            except Exception as e:
+                print(f"[Broadcast] ❌ 绑定 {self.listen_port} 失败: {e}")
                 return
             sock.settimeout(1.0)
             self._sock = sock
-        except Exception:
+            print(f"[Broadcast] ✅ 已监听 UDP :{self.listen_port}")
+        except Exception as e:
+            print(f"[Broadcast] ❌ 创建 socket 失败: {e}")
             return
 
         while self._running:
@@ -550,6 +629,7 @@ class BroadcastListener(QThread):
                 port = PORT
 
             ip = addr[0]
+            print(f"[Broadcast] 📥 收到广播 from {ip}:{port}")
             if ip and ip != '0.0.0.0':
                 self.device_announced.emit(ip, port)
 
@@ -863,7 +943,7 @@ class HistoryPanel(QWidget):
 class MainWindow(QWidget):
     devices_offline_signal = Signal(list)
     send_result_signal = Signal(str, str, dict)
-    broadcast_hit_signal = Signal(str, int)      # 方案 D：收到广播
+    broadcast_hit_signal = Signal(str, int)
 
     def __init__(self):
         super().__init__()
@@ -898,7 +978,6 @@ class MainWindow(QWidget):
         self._send_guard_timer.setSingleShot(True)
         self._send_guard_timer.timeout.connect(self._recover_send_btn)
 
-        # 方案 D：广播源 IP 去重（1 秒内同 IP 只处理一次）
         self._recent_broadcast = {}
 
         self.history = History()
@@ -913,7 +992,6 @@ class MainWindow(QWidget):
         self.setup_panels()
         self.setup_timers()
 
-        # 方案 D：启动广播监听
         self._broadcast_listener = BroadcastListener(BROADCAST_PORT)
         self._broadcast_listener.device_announced.connect(
             self.broadcast_hit_signal)
@@ -1105,38 +1183,28 @@ class MainWindow(QWidget):
 
     # ---------- 方案 D：广播命中 ----------
     def _on_broadcast_hit(self, ip, port):
-        """
-        收到手机 UDP 广播 → 异步 ping 确认 → 加入设备列表
-        ip:   手机 IP
-        port: 手机 HTTP 服务端口（8848）
-        """
         now = datetime.now().timestamp()
         last = self._recent_broadcast.get(ip, 0)
         if now - last < 1.0:
-            return                       # 1 秒内同 IP 只处理一次
+            return
         self._recent_broadcast[ip] = now
 
-        # 已在设备列表中 → 只刷新退避即可
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
                 self._reset_backoff()
                 return
 
-        # 异步 ping 确认，避免阻塞 UI
         def do_ping():
             result = check_ip(ip, port=port, timeout=1.0)
             if result:
-                # 切回主线程更新 UI
                 QTimer.singleShot(
                     0, lambda: self._add_device_from_broadcast(result))
 
         threading.Thread(target=do_ping, daemon=True).start()
 
     def _add_device_from_broadcast(self, result):
-        """将广播发现的新设备加入列表"""
         ip, name = result
 
-        # 再次去重（防竞态）
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
                 self._reset_backoff()
@@ -1146,7 +1214,6 @@ class MainWindow(QWidget):
         self.devices.sort(
             key=lambda x: tuple(int(p) for p in x[0].split('.')))
 
-        # 选中新加入的设备
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
                 self.current_index = i
@@ -1215,10 +1282,9 @@ class MainWindow(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
 
-    # ---------- 方案 C：窗口激活触发扫描 ----------
+    # ---------- 窗口激活触发扫描 ----------
     def showEvent(self, event):
         super().showEvent(event)
-        # 窗口从托盘/隐藏状态重新显示时，如果未连接，立即扫描
         if not self.current_ip and not self._quitting:
             QTimer.singleShot(50, self._trigger_immediate_scan)
 
@@ -1257,7 +1323,6 @@ class MainWindow(QWidget):
             if self.history_panel.isVisible():
                 self.history_panel.refresh()
 
-            # 方案 C：复制链接时立即扫描
             if not self.current_ip and not self._discovering:
                 self._trigger_immediate_scan()
 
@@ -1285,6 +1350,11 @@ class MainWindow(QWidget):
         menu.addAction(history_action)
 
         menu.addSeparator()
+
+        # 网络权限修复
+        fw_action = QAction("修复网络权限（防火墙）", self)
+        fw_action.triggered.connect(self._on_fix_firewall)
+        menu.addAction(fw_action)
 
         theme_menu = menu.addMenu("主题")
 
@@ -1314,6 +1384,17 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _on_fix_firewall(self):
+        if firewall_rule_exists():
+            self._flash("权限正常", "#34C759")
+            return
+        ensure_firewall_rule(silent=False)
+        # 延迟一下再检查
+        QTimer.singleShot(2000, lambda: self._flash(
+            "权限已加" if firewall_rule_exists() else "未授权",
+            "#34C759" if firewall_rule_exists() else "#FF3B30"
+        ))
 
     def _set_theme(self, mode):
         ThemeManager.mode = mode
@@ -1346,7 +1427,6 @@ class MainWindow(QWidget):
 
     def quit_app(self):
         self._quitting = True
-        # 停止广播监听线程
         try:
             self._broadcast_listener.stop()
             self._broadcast_listener.wait(1000)
@@ -1664,6 +1744,14 @@ class MainWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    # ✅ 首次启动自动检查并添加防火墙规则
+    #    已存在 → 静默跳过
+    #    不存在 → 弹一次 UAC
+    try:
+        ensure_firewall_rule(silent=True)
+    except Exception as e:
+        print(f"[Firewall] 检查异常: {e}")
 
     window = MainWindow()
     window.show()
