@@ -48,14 +48,15 @@ SCAN_BACKOFF_INITIAL = 10
 SCAN_BACKOFF_MAX = 60
 
 # 窗口尺寸
-WIN_WIDTH = 400
+WIN_WIDTH = 380
 WIN_HEIGHT = 44
 
 # 输入框宽度（约 10 个汉字 + padding）
 INPUT_WIDTH = 150
 
-# 状态文字宽度（含手机名）
-STATUS_WIDTH = 108
+# 状态区宽度范围
+STATUS_MIN_W = 56
+STATUS_MAX_W = 110
 
 # 历史记录文件
 HISTORY_FILE = os.path.join(
@@ -87,19 +88,14 @@ def is_noise_clipboard(text):
     s = text.strip()
     if not s:
         return True
-    # 本地文件 URL 如 file:///C:/Users/...
     if s.lower().startswith('file:'):
         return True
-    # Windows 绝对路径 如 C:\Users\... 或 C:/Users/...
     if re.match(r'^[A-Za-z]:[\\/]', s):
         return True
-    # UNC 路径 \\server\share
     if s.startswith('\\\\'):
         return True
-    # Unix 绝对路径
     if s.startswith('/') and not s.startswith('//'):
         return True
-    # 单个文件路径（无空格，以已知扩展名结尾）
     if ' ' not in s and '\n' not in s and _FILE_EXT_PATTERN.search(s):
         return True
     return False
@@ -109,7 +105,6 @@ def is_noise_clipboard(text):
 # 主题管理
 # ============================================================
 class ThemeManager:
-    """全局主题：auto / light / dark"""
     mode = "auto"
     current = "dark"
 
@@ -250,7 +245,6 @@ class TitleParser:
 
     @staticmethod
     def _extract_from_text(s):
-        """从文本中提取剧名，跳过所有噪声 token"""
         tokens = s.split()
         if not tokens:
             return None
@@ -450,7 +444,7 @@ def send_to_phone(ip, text, port=PORT, timeout=SEND_TIMEOUT):
 
 
 # ============================================================
-# 扫描线程（带 worker_id 防止过期回调）
+# 扫描线程
 # ============================================================
 class DiscoveryWorker(QThread):
     finished_scan = Signal(list, int)
@@ -765,7 +759,6 @@ class MainWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowIcon(create_icon())
 
-        # 多设备
         self.devices = []
         self.current_index = 0
 
@@ -776,11 +769,9 @@ class MainWindow(QWidget):
         self._quitting = False
         self._scan_hard_timeout = None
 
-        # 扫描退避 / worker 代次
         self._scan_backoff = SCAN_BACKOFF_INITIAL
         self._scan_id = 0
 
-        # flash 定时器（可取消）
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._restore_status)
@@ -799,7 +790,6 @@ class MainWindow(QWidget):
         self.position_top_right()
         QTimer.singleShot(500, lambda: self.start_discovery(silent=False))
 
-    # ---------- 当前设备 ----------
     @property
     def current_device(self):
         if 0 <= self.current_index < len(self.devices):
@@ -823,21 +813,29 @@ class MainWindow(QWidget):
         self.container.setAttribute(Qt.WA_StyledBackground, True)
         self.container.setGeometry(0, 0, WIN_WIDTH, WIN_HEIGHT)
 
-        # 状态点（可点击）
-        self.status_dot = QLabel("●")
-        self.status_dot.setFixedWidth(10)
-        self.status_dot.setAlignment(Qt.AlignCenter)
-        self.status_dot.setCursor(Qt.PointingHandCursor)
-        self.status_dot.mousePressEvent = self._on_status_clicked
+        # 状态区：两行显示，宽度动态自适应
+        self.status_box = QWidget()
+        self.status_box.setFixedWidth(STATUS_MIN_W)
+        self.status_box.setCursor(Qt.PointingHandCursor)
+        self.status_box.mousePressEvent = self._on_status_clicked
 
-        # 状态文字（含手机名，可点击）
-        self.status_text = QLabel("扫描中")
-        self.status_text.setFixedWidth(STATUS_WIDTH)
-        self.status_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.status_text.setCursor(Qt.PointingHandCursor)
-        self.status_text.mousePressEvent = self._on_status_clicked
+        self.status_line1 = QLabel("● 扫描中")
+        self.status_line1.setFixedHeight(14)
+        self.status_line1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.status_line1.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        # 输入框：固定 150px（≈ 10 个汉字 + padding），紧贴历史按钮
+        self.status_line2 = QLabel("")
+        self.status_line2.setFixedHeight(14)
+        self.status_line2.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.status_line2.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        svb = QVBoxLayout(self.status_box)
+        svb.setContentsMargins(0, 0, 0, 0)
+        svb.setSpacing(0)
+        svb.addWidget(self.status_line1)
+        svb.addWidget(self.status_line2)
+
+        # 输入框
         self.input = QLineEdit()
         self.input.setPlaceholderText("等待剪贴板...")
         self.input.setFixedHeight(28)
@@ -871,10 +869,9 @@ class MainWindow(QWidget):
         self.close_btn.clicked.connect(self.hide)
 
         row = QHBoxLayout()
-        row.setContentsMargins(8, 8, 6, 8)
+        row.setContentsMargins(8, 6, 6, 6)
         row.setSpacing(4)
-        row.addWidget(self.status_dot)
-        row.addWidget(self.status_text)
+        row.addWidget(self.status_box)
         row.addWidget(self.input)
         row.addWidget(self.history_btn)
         row.addWidget(self.send_btn)
@@ -1036,7 +1033,6 @@ class MainWindow(QWidget):
             return
         self.last_clipboard = text
 
-        # 过滤本地文件路径、纯文件等无关内容
         if is_noise_clipboard(text):
             return
 
@@ -1204,7 +1200,9 @@ class MainWindow(QWidget):
         wid = self._scan_id
 
         if not silent and not self.current_ip:
-            self.set_status_text("扫描中", "#FF9500")
+            self.set_line1("● 扫描中", "#FF9500")
+            self.set_line2("")
+            self._fit_status_width()
             self.send_btn.setEnabled(False)
 
         if self._scan_hard_timeout is not None:
@@ -1272,50 +1270,71 @@ class MainWindow(QWidget):
             self._schedule_scan(self._scan_backoff * 1000)
 
     def _update_status(self):
+        c = ThemeManager.colors()
+
         if self._discovering:
-            self.set_status_text("扫描中", "#FF9500")
-            self.status_text.setToolTip("正在扫描局域网...")
+            self.set_line1("● 扫描中", "#FF9500")
+            self.set_line2("")
+            self._fit_status_width()
+            self.status_box.setToolTip("正在扫描局域网...")
             return
 
         n = len(self.devices)
         if n == 0:
-            self.set_status_text("未找到", "#FF3B30")
-            self.status_text.setToolTip(
+            self.set_line1("● 未找到", "#FF3B30")
+            self.set_line2("")
+            self._fit_status_width()
+            self.status_box.setToolTip(
                 "未发现局域网内的手机\n点击立即重新扫描")
             return
 
         name = self.current_name or "手机"
 
-        # 计算前缀 + 名字省略
         if n == 1:
-            prefix = "已连接 "
+            line1 = "已连接"
         else:
-            prefix = f"已连{n}台 "
+            line1 = f"已连接 ({n})"
 
-        fm = QFontMetrics(self.status_text.font())
-        prefix_w = fm.horizontalAdvance(prefix)
-        avail = max(20, STATUS_WIDTH - prefix_w - 4)
-        elided_name = fm.elidedText(name, Qt.ElideRight, avail)
-        display = prefix + elided_name
+        # 手机名过长时省略（按最大宽度计算）
+        fm2 = QFontMetrics(self.status_line2.font())
+        elided = fm2.elidedText(name, Qt.ElideRight, STATUS_MAX_W - 4)
+
+        self.set_line1(f"● {line1}", "#34C759")
+        self.set_line2(elided)
+        self._fit_status_width()
 
         tip = f"{name}\nIP: {self.current_ip}"
         if n > 1:
             tip += f"\n\n共 {n} 台设备在线\n点击切换"
         else:
             tip += "\n\n点击切换设备"
-        self.status_text.setToolTip(tip)
+        self.status_box.setToolTip(tip)
 
-        self.set_status_text(display, "#34C759")
+    def _fit_status_width(self):
+        """根据两行文本内容自适应状态区宽度（限制在 MIN~MAX 之间）"""
+        fm1 = QFontMetrics(self.status_line1.font())
+        fm2 = QFontMetrics(self.status_line2.font())
+        w1 = fm1.horizontalAdvance(self.status_line1.text())
+        w2 = fm2.horizontalAdvance(self.status_line2.text())
+        target = max(w1, w2) + 4
+        target = max(STATUS_MIN_W, min(target, STATUS_MAX_W))
+        if self.status_box.width() != target:
+            self.status_box.setFixedWidth(target)
 
-    def set_status_text(self, text, color):
-        self.status_dot.setStyleSheet(f"color: {color}; font-size: 11px;")
-        self.status_text.setText(text)
-        if color in ("#FF3B30", "#34C759", "#FF9500"):
-            self.status_text.setStyleSheet(
-                f"color: {color}; font-size: 11px;")
-        else:
-            self.status_text.setStyleSheet(
-                f"color: {ThemeManager.colors()['text_sub']}; font-size: 11px;")
+    def set_line1(self, text, color):
+        self.status_line1.setText(text)
+        self.status_line1.setStyleSheet(
+            f"color: {color}; font-size: 11px; background: transparent;"
+        )
+
+    def set_line2(self, text, color=None):
+        if color is None:
+            color = ThemeManager.colors()['text_sub']
+        self.status_line2.setText(text)
+        # 字号与第一行一致，都是 11px
+        self.status_line2.setStyleSheet(
+            f"color: {color}; font-size: 11px; background: transparent;"
+        )
 
     def _restore_status(self):
         self._update_status()
@@ -1331,7 +1350,6 @@ class MainWindow(QWidget):
             self._flash("未连接", "#FF3B30")
             return
 
-        # 立即清空输入框并刷新按钮状态，不等网络结果
         self.input.clear()
         self.send_btn.setEnabled(False)
 
@@ -1356,7 +1374,9 @@ class MainWindow(QWidget):
             self._flash("失败", "#FF3B30")
 
     def _flash(self, text, color):
-        self.set_status_text(text, color)
+        self.set_line1(f"● {text}", color)
+        self.set_line2("")
+        self._fit_status_width()
         self._flash_timer.start(1500)
 
 
