@@ -1128,6 +1128,8 @@ class MainWindow(QWidget):
         self.send_btn.clicked.connect(self.on_send)
         self.send_btn.setEnabled(False)
 
+        self.input.textChanged.connect(self._update_send_btn_state)
+
         self.close_btn = QPushButton("✕")
         self.close_btn.setFixedSize(sc(22), sc(22))
         self.close_btn.clicked.connect(self.hide)
@@ -1756,6 +1758,11 @@ class MainWindow(QWidget):
         self._update_status()
 
     # ---------- 发送 ----------
+    def _update_send_btn_state(self, *args):
+        self.send_btn.setEnabled(
+            self.current_ip is not None
+            and bool(self.input.text().strip()))
+
     def on_send(self):
         text = self.input.text().strip()
         if not text:
@@ -1836,7 +1843,7 @@ def main():
     UI_SCALE = compute_ui_scale()
 
     global WIN_WIDTH, WIN_HEIGHT, INPUT_WIDTH, STATUS_MIN_W, STATUS_MAX_W
-    WIN_WIDTH = sc(400)
+    WIN_WIDTH = sc(430)
     WIN_HEIGHT = sc(44)
     INPUT_WIDTH = sc(150)
     STATUS_MIN_W = sc(56)
