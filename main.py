@@ -559,6 +559,10 @@ def ping_phone(ip, port=PORT, timeout=HEARTBEAT_TIMEOUT):
         return False
 
 
+# 局域网直连，显式绕过系统代理（Clash 等代理会让局域网请求延迟 8-10 秒）
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def send_to_phone(ip, text, port=PORT, timeout=SEND_TIMEOUT):
     url = f"http://{ip}:{port}/submit"
     body = json.dumps({"text": text}, ensure_ascii=False).encode('utf-8')
@@ -567,7 +571,7 @@ def send_to_phone(ip, text, port=PORT, timeout=SEND_TIMEOUT):
     req.add_header('User-Agent', 'KaiFanLe-Helper/1.0')
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _DIRECT_OPENER.open(req, timeout=timeout) as resp:
             data = resp.read().decode('utf-8')
             return json.loads(data)
     except urllib.error.HTTPError as e:
