@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths-ignore:
       - 'dist/**'
+      - '**.md'
   workflow_dispatch:
 
 permissions:
