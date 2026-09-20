@@ -1108,6 +1108,11 @@ class MainWindow(QWidget):
         self.history_btn.setFixedSize(sc(28), sc(28))
         self.history_btn.clicked.connect(self.toggle_history)
 
+        self.name_btn = QPushButton("🎲")
+        self.name_btn.setFixedSize(sc(28), sc(28))
+        self.name_btn.setToolTip("生成名字并复制")
+        self.name_btn.clicked.connect(self.generate_and_copy_name)
+
         self.send_btn = QPushButton("发送")
         self.send_btn.setFixedSize(sc(48), sc(28))
         self.send_btn.setStyleSheet(f"""
@@ -1133,6 +1138,7 @@ class MainWindow(QWidget):
         row.addWidget(self.status_box)
         row.addWidget(self.input)
         row.addWidget(self.history_btn)
+        row.addWidget(self.name_btn)
         row.addWidget(self.send_btn)
         row.addWidget(self.close_btn)
         self.container.setLayout(row)
@@ -1164,6 +1170,17 @@ class MainWindow(QWidget):
         self._update_status()
 
         self.history_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c['input_bg']};
+                color: {c['text']};
+                border: none; border-radius: {sc(8)}px;
+                font-size: {sc(14)}px;
+            }}
+            QPushButton:hover {{ background: {c['hover_strong']}; }}
+            QPushButton:pressed {{ background: {c['hover']}; }}
+        """)
+
+        self.name_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {c['input_bg']};
                 color: {c['text']};
@@ -1819,7 +1836,7 @@ def main():
     UI_SCALE = compute_ui_scale()
 
     global WIN_WIDTH, WIN_HEIGHT, INPUT_WIDTH, STATUS_MIN_W, STATUS_MAX_W
-    WIN_WIDTH = sc(380)
+    WIN_WIDTH = sc(400)
     WIN_HEIGHT = sc(44)
     INPUT_WIDTH = sc(150)
     STATUS_MIN_W = sc(56)
