@@ -1809,14 +1809,26 @@ class MainWindow(QWidget):
             self._flash("已发送", "#34C759")
             return
 
-        msg = str(result.get("message", "")).lower()
+        raw_msg = str(result.get("message", ""))
+
+        # 记录失败详情，便于诊断
+        try:
+            log_path = os.path.join(
+                os.path.expanduser("~"), ".kfl_send_log.txt")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("%s\tip=%s\ttext=%r\tresult=%r\n" % (
+                    datetime.now().isoformat(), ip, sent_text, result))
+        except Exception:
+            pass
+
+        msg = raw_msg.lower()
         is_conn_error = any(k in msg for k in CONN_ERROR_KEYWORDS)
 
         if is_conn_error and ip:
             self._flash("连接已断开", "#FF3B30")
             self._on_devices_offline([ip])
         else:
-            self._flash("失败", "#FF3B30")
+            self._flash(raw_msg[:16] if raw_msg else "失败", "#FF3B30")
 
         self.send_btn.setEnabled(
             self.current_ip is not None
