@@ -11,6 +11,7 @@ import sys
 import os
 import re
 import json
+import random
 import socket
 import threading
 import urllib.request
@@ -18,7 +19,9 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from PySide2.QtCore import Qt, QTimer, QThread, Signal, Slot, QPoint
+from PySide2.QtCore import (
+    Qt, QTimer, QThread, Signal, Slot, QPoint, QProcess
+)
 from PySide2.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient,
     QFontMetrics
@@ -28,6 +31,63 @@ from PySide2.QtWidgets import (
     QSystemTrayIcon, QMenu, QAction, QLineEdit, QListWidget, QListWidgetItem,
     QSizePolicy, QFrame
 )
+
+# ============================================================
+# 高 DPI 自适应（必须在创建 QApplication 之前设置）
+# ============================================================
+if hasattr(Qt, "AA_EnableHighDpiScaling"):
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+
+if hasattr(Qt, "AA_UseHighDpiPixmaps"):
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
+# ============================================================
+# 全局 UI 缩放（根据屏幕分辨率动态调整）
+# ============================================================
+UI_SCALE = 1.0
+SCALE_MULTIPLIER = 1.0
+
+SETTINGS_FILE = os.path.join(
+    os.path.expanduser("~"), ".kai_fan_le_helper_settings.json"
+)
+
+
+def load_settings():
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_settings(data):
+    try:
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def compute_ui_scale():
+    app = QApplication.instance()
+    screen = app.primaryScreen() if app else None
+    if screen is None:
+        return 1.0
+    geo = screen.availableGeometry()
+    w, h = geo.width(), geo.height()
+    if w <= 0 or h <= 0:
+        return 1.0
+    res_scale = min(w / 1920.0, h / 1080.0)
+    return max(1.0, min(res_scale, 2.0))
+
+
+def sc(value):
+    return max(1, int(round(value * UI_SCALE * SCALE_MULTIPLIER)))
+
 
 # ============================================================
 # 配置
@@ -75,6 +135,57 @@ DOUYIN_HINTS = [
     "抖音搜索",
     "dou音搜索",
 ]
+
+
+# ============================================================
+# 随机中文姓名
+# ============================================================
+SINGLE_SURNAMES = list(
+    "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华"
+    "金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花"
+    "方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时"
+    "傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝"
+    "明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾"
+    "路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯"
+    "管卢莫经房裘缪干解应宗丁宣邓郁单杭洪包诸左石崔吉钮龚程"
+    "嵇邢滑裴陆荣翁荀羊甄曲封芮羿储靳汲邴糜松井段富巫乌焦巴"
+    "弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武"
+    "符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲台从鄂索咸籍赖卓"
+    "蔺屠蒙池乔阴胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍郤"
+    "璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习"
+    "宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙"
+    "东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋"
+    "沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益桓公"
+)
+
+COMPOUND_SURNAMES = [
+    "欧阳", "太史", "端木", "上官", "司马", "东方", "独孤", "南宫",
+    "万俟", "闻人", "夏侯", "诸葛", "尉迟", "公羊", "赫连", "澹台",
+    "皇甫", "宗政", "濮阳", "公冶", "太叔", "申屠", "公孙", "慕容",
+    "仲孙", "钟离", "长孙", "宇文", "司徒", "鲜于", "司空", "闾丘",
+    "子车", "亓官", "司寇", "巫马", "公西", "颛孙", "壤驷", "公良",
+    "漆雕", "乐正", "宰父", "谷梁", "拓跋", "夹谷", "轩辕", "令狐",
+    "段干", "百里", "呼延", "东郭", "南门", "羊舌", "微生", "梁丘",
+    "左丘", "东门", "西门", "南荣", "第五", "公仪", "公乘", "贯丘",
+]
+
+GIVEN_CHARS = list(
+    "伟芳娜秀英敏静丽强磊军洋勇艳杰娟涛明超霞平刚桂华文玉建"
+    "国志海峰鹏浩宇轩涵欣怡佳琪一诺子晨天心雨雪梦诗嘉俊睿泽"
+    "承思若彤妍雅欢乐博安宁康泰瑞祥龙凤燕莉玲丹萍红梅兰竹菊"
+    "松柏山河江湖晨曦皓月星辰辰逸昊天思远志强建华小平志明建"
+    "伟丽娟艳芳娜静敏霞秀英华玉梅兰竹菊文博雅琪子轩浩然一诺"
+)
+
+
+def generate_name():
+    if random.random() < 0.15:
+        surname = random.choice(COMPOUND_SURNAMES)
+    else:
+        surname = random.choice(SINGLE_SURNAMES)
+    given_len = random.randint(1, 2)
+    given = ''.join(random.choice(GIVEN_CHARS) for _ in range(given_len))
+    return surname + given
 
 
 # ============================================================
@@ -615,7 +726,7 @@ class DevicePanel(QWidget):
 
         self.close_btn = QPushButton("关闭")
         self.close_btn.setObjectName("closeBtn")
-        self.close_btn.setFixedHeight(26)
+        self.close_btn.setFixedHeight(sc(26))
         self.close_btn.clicked.connect(self.hide)
 
         bottom = QHBoxLayout()
@@ -624,8 +735,8 @@ class DevicePanel(QWidget):
         bottom.addWidget(self.close_btn)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(sc(12), sc(10), sc(12), sc(10))
+        layout.setSpacing(sc(6))
         layout.addWidget(self.title)
         layout.addWidget(self.list, 1)
         layout.addLayout(bottom)
@@ -642,13 +753,13 @@ class DevicePanel(QWidget):
         self.container.setStyleSheet(f"""
             #container {{
                 background: {c['bg_solid']};
-                border-radius: 12px;
+                border-radius: {sc(12)}px;
                 border: 1px solid {c['border']};
             }}
             QLabel#title {{
                 color: {c['text']};
-                font-size: 13px; font-weight: 600;
-                padding: 4px;
+                font-size: {sc(13)}px; font-weight: 600;
+                padding: {sc(4)}px;
                 background: transparent;
             }}
             QListWidget {{
@@ -656,12 +767,12 @@ class DevicePanel(QWidget):
                 border: none;
                 outline: none;
                 color: {c['text']};
-                font-size: 13px;
+                font-size: {sc(13)}px;
             }}
             QListWidget::item {{
-                padding: 10px 14px;
-                border-radius: 6px;
-                margin: 2px 6px;
+                padding: {sc(10)}px {sc(14)}px;
+                border-radius: {sc(6)}px;
+                margin: {sc(2)}px {sc(6)}px;
             }}
             QListWidget::item:selected {{
                 background: {c['list_sel']};
@@ -673,8 +784,8 @@ class DevicePanel(QWidget):
             QPushButton#closeBtn {{
                 background: {c['input_bg']};
                 color: {c['text']};
-                border: none; border-radius: 8px;
-                padding: 0 14px; font-size: 12px;
+                border: none; border-radius: {sc(8)}px;
+                padding: 0 {sc(14)}px; font-size: {sc(12)}px;
             }}
             QPushButton#closeBtn:hover {{
                 background: {c['hover_strong']};
@@ -683,7 +794,7 @@ class DevicePanel(QWidget):
 
     def _relayout(self):
         n = len(self.devices) if self.devices else 1
-        h = 60 + min(n, 6) * 44 + 40
+        h = sc(60) + min(n, 6) * sc(44) + sc(40)
         self.setFixedHeight(h)
         self.container.setGeometry(0, 0, self.width(), h)
 
@@ -748,29 +859,29 @@ class HistoryPanel(QWidget):
 
         self.clear_btn = QPushButton("清空")
         self.clear_btn.setObjectName("clearBtn")
-        self.clear_btn.setFixedHeight(26)
+        self.clear_btn.setFixedHeight(sc(26))
         self.clear_btn.clicked.connect(self._on_clear)
 
         self.close_btn = QPushButton("关闭")
         self.close_btn.setObjectName("closeBtn")
-        self.close_btn.setFixedHeight(26)
+        self.close_btn.setFixedHeight(sc(26))
         self.close_btn.clicked.connect(self.hide)
 
         bottom = QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
-        bottom.setSpacing(6)
+        bottom.setSpacing(sc(6))
         bottom.addStretch()
         bottom.addWidget(self.clear_btn)
         bottom.addWidget(self.close_btn)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(sc(12), sc(10), sc(12), sc(10))
+        layout.setSpacing(sc(6))
         layout.addWidget(self.title)
         layout.addWidget(self.list, 1)
         layout.addLayout(bottom)
         self.container.setLayout(layout)
-        self.container.setGeometry(0, 0, WIN_WIDTH, 320)
+        self.container.setGeometry(0, 0, WIN_WIDTH, sc(320))
 
     def showEvent(self, event):
         self.apply_theme()
@@ -781,13 +892,13 @@ class HistoryPanel(QWidget):
         self.container.setStyleSheet(f"""
             #container {{
                 background: {c['bg_solid']};
-                border-radius: 12px;
+                border-radius: {sc(12)}px;
                 border: 1px solid {c['border']};
             }}
             QLabel#title {{
                 color: {c['text']};
-                font-size: 13px; font-weight: 600;
-                padding: 4px;
+                font-size: {sc(13)}px; font-weight: 600;
+                padding: {sc(4)}px;
                 background: transparent;
             }}
             QListWidget {{
@@ -795,12 +906,12 @@ class HistoryPanel(QWidget):
                 border: none;
                 outline: none;
                 color: {c['text']};
-                font-size: 13px;
+                font-size: {sc(13)}px;
             }}
             QListWidget::item {{
-                padding: 8px 14px;
-                border-radius: 6px;
-                margin: 2px 6px;
+                padding: {sc(8)}px {sc(14)}px;
+                border-radius: {sc(6)}px;
+                margin: {sc(2)}px {sc(6)}px;
             }}
             QListWidget::item:selected {{
                 background: {c['list_sel']};
@@ -812,8 +923,8 @@ class HistoryPanel(QWidget):
             QPushButton#closeBtn {{
                 background: {c['input_bg']};
                 color: {c['text']};
-                border: none; border-radius: 8px;
-                padding: 0 14px; font-size: 12px;
+                border: none; border-radius: {sc(8)}px;
+                padding: 0 {sc(14)}px; font-size: {sc(12)}px;
             }}
             QPushButton#closeBtn:hover {{
                 background: {c['hover_strong']};
@@ -821,8 +932,8 @@ class HistoryPanel(QWidget):
             QPushButton#clearBtn {{
                 background: {c['danger_bg']};
                 color: {c['danger_text']};
-                border: none; border-radius: 8px;
-                padding: 0 14px; font-size: 12px;
+                border: none; border-radius: {sc(8)}px;
+                padding: 0 {sc(14)}px; font-size: {sc(12)}px;
             }}
             QPushButton#clearBtn:hover {{
                 background: {c['danger_bg']};
@@ -862,6 +973,14 @@ class MainWindow(QWidget):
     devices_offline_signal = Signal(list)
     send_result_signal = Signal(str, str, dict)
     broadcast_hit_signal = Signal(str, int)
+
+    SCALE_OPTIONS = [
+        ("自动", 1.0),
+        ("1.25x", 1.25),
+        ("1.5x", 1.5),
+        ("1.75x", 1.75),
+        ("2.0x", 2.0),
+    ]
 
     def __init__(self):
         super().__init__()
@@ -961,12 +1080,12 @@ class MainWindow(QWidget):
         self.status_box.mousePressEvent = self._on_status_clicked
 
         self.status_line1 = QLabel("● 扫描中")
-        self.status_line1.setFixedHeight(14)
+        self.status_line1.setFixedHeight(sc(14))
         self.status_line1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.status_line1.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self.status_line2 = QLabel("")
-        self.status_line2.setFixedHeight(14)
+        self.status_line2.setFixedHeight(sc(14))
         self.status_line2.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.status_line2.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.status_line2.setVisible(False)
@@ -981,36 +1100,36 @@ class MainWindow(QWidget):
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("等待剪贴板...")
-        self.input.setFixedHeight(28)
+        self.input.setFixedHeight(sc(28))
         self.input.setFixedWidth(INPUT_WIDTH)
         self.input.returnPressed.connect(self.on_send)
 
         self.history_btn = QPushButton("📋")
-        self.history_btn.setFixedSize(28, 28)
+        self.history_btn.setFixedSize(sc(28), sc(28))
         self.history_btn.clicked.connect(self.toggle_history)
 
         self.send_btn = QPushButton("发送")
-        self.send_btn.setFixedSize(48, 28)
-        self.send_btn.setStyleSheet("""
-            QPushButton {
+        self.send_btn.setFixedSize(sc(48), sc(28))
+        self.send_btn.setStyleSheet(f"""
+            QPushButton {{
                 background: #34C759; color: white;
-                border: none; border-radius: 8px;
-                font-size: 12px; font-weight: 600;
-            }
-            QPushButton:hover { background: #30D158; }
-            QPushButton:pressed { background: #28A745; }
-            QPushButton:disabled { background: #AEAEB2; color: #FFFFFF; }
+                border: none; border-radius: {sc(8)}px;
+                font-size: {sc(12)}px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: #30D158; }}
+            QPushButton:pressed {{ background: #28A745; }}
+            QPushButton:disabled {{ background: #AEAEB2; color: #FFFFFF; }}
         """)
         self.send_btn.clicked.connect(self.on_send)
         self.send_btn.setEnabled(False)
 
         self.close_btn = QPushButton("✕")
-        self.close_btn.setFixedSize(22, 22)
+        self.close_btn.setFixedSize(sc(22), sc(22))
         self.close_btn.clicked.connect(self.hide)
 
         row = QHBoxLayout()
-        row.setContentsMargins(8, 6, 6, 6)
-        row.setSpacing(4)
+        row.setContentsMargins(sc(8), sc(6), sc(6), sc(6))
+        row.setSpacing(sc(4))
         row.addWidget(self.status_box)
         row.addWidget(self.input)
         row.addWidget(self.history_btn)
@@ -1024,17 +1143,17 @@ class MainWindow(QWidget):
         self.container.setStyleSheet(f"""
             #container {{
                 background: {c['bg']};
-                border-radius: 12px;
+                border-radius: {sc(12)}px;
                 border: 1px solid {c['border']};
             }}
             QLabel {{ background: transparent; }}
             QLineEdit {{
                 background: {c['input_bg']};
                 border: none;
-                border-radius: 8px;
+                border-radius: {sc(8)}px;
                 color: {c['text']};
-                font-size: 13px;
-                padding: 0 10px;
+                font-size: {sc(13)}px;
+                padding: 0 {sc(10)}px;
                 selection-background-color: {c['list_sel']};
             }}
             QLineEdit:focus {{
@@ -1048,8 +1167,8 @@ class MainWindow(QWidget):
             QPushButton {{
                 background: {c['input_bg']};
                 color: {c['text']};
-                border: none; border-radius: 8px;
-                font-size: 14px;
+                border: none; border-radius: {sc(8)}px;
+                font-size: {sc(14)}px;
             }}
             QPushButton:hover {{ background: {c['hover_strong']}; }}
             QPushButton:pressed {{ background: {c['hover']}; }}
@@ -1059,8 +1178,8 @@ class MainWindow(QWidget):
             QPushButton {{
                 background: transparent;
                 color: {c['close_color']};
-                border: none; border-radius: 6px;
-                font-size: 11px; font-weight: 600;
+                border: none; border-radius: {sc(6)}px;
+                font-size: {sc(11)}px; font-weight: 600;
             }}
             QPushButton:hover {{
                 background: {c['hover']};
@@ -1075,8 +1194,8 @@ class MainWindow(QWidget):
 
     def position_top_right(self):
         screen = QApplication.primaryScreen().availableGeometry()
-        x = screen.right() - self.width() - 20
-        y = screen.top() + 20
+        x = screen.right() - self.width() - sc(20)
+        y = screen.top() + sc(20)
         self.move(x, y)
 
     def _on_status_clicked(self, event):
@@ -1159,7 +1278,7 @@ class MainWindow(QWidget):
             self.device_panel.hide()
             return
         self.device_panel.refresh(self.devices, self.current_index)
-        pos = self.mapToGlobal(QPoint(0, self.height() + 6))
+        pos = self.mapToGlobal(QPoint(0, self.height() + sc(6)))
         self.device_panel.move(pos)
         self.device_panel.show()
 
@@ -1174,7 +1293,7 @@ class MainWindow(QWidget):
             self.history_panel.hide()
             return
         self.history_panel.refresh()
-        pos = self.mapToGlobal(QPoint(0, self.height() + 6))
+        pos = self.mapToGlobal(QPoint(0, self.height() + sc(6)))
         self.history_panel.move(pos)
         self.history_panel.show()
 
@@ -1267,6 +1386,20 @@ class MainWindow(QWidget):
         history_action.triggered.connect(self._show_history_from_tray)
         menu.addAction(history_action)
 
+        name_action = QAction("生成名字并复制", self)
+        name_action.triggered.connect(self.generate_and_copy_name)
+        menu.addAction(name_action)
+
+        menu.addSeparator()
+
+        scale_menu = menu.addMenu("缩放")
+        for label, mult in self.SCALE_OPTIONS:
+            act = QAction(label, self, checkable=True)
+            act.setChecked(abs(SCALE_MULTIPLIER - mult) < 1e-6)
+            act.triggered.connect(
+                lambda checked=False, m=mult: self._set_scale(m))
+            scale_menu.addAction(act)
+
         menu.addSeparator()
 
         theme_menu = menu.addMenu("主题")
@@ -1297,6 +1430,34 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _set_scale(self, mult):
+        if abs(SCALE_MULTIPLIER - mult) < 1e-6:
+            return
+        settings = load_settings()
+        settings["scale_multiplier"] = mult
+        save_settings(settings)
+        self._restart_app()
+
+    def _restart_app(self):
+        try:
+            if getattr(sys, 'frozen', False):
+                args = sys.argv[1:]
+            else:
+                args = sys.argv
+            QProcess.startDetached(sys.executable, args)
+        except Exception:
+            pass
+        self.quit_app()
+
+    def generate_and_copy_name(self):
+        name = generate_name()
+        try:
+            QApplication.clipboard().setText(name)
+            self.last_clipboard = name
+        except Exception:
+            pass
+        self._flash(f"已复制 {name}", "#34C759")
 
     def _set_theme(self, mode):
         ThemeManager.mode = mode
@@ -1533,7 +1694,7 @@ class MainWindow(QWidget):
             line1 = f"已连接 ({n})"
 
         fm2 = QFontMetrics(self.status_line2.font())
-        elided = fm2.elidedText(name, Qt.ElideRight, STATUS_MAX_W - 4)
+        elided = fm2.elidedText(name, Qt.ElideRight, STATUS_MAX_W - sc(4))
 
         self.set_line1(f"● {line1}", "#34C759")
         self.set_line2(elided)
@@ -1553,9 +1714,9 @@ class MainWindow(QWidget):
         if self.status_line2.isVisible():
             fm2 = QFontMetrics(self.status_line2.font())
             w2 = fm2.horizontalAdvance(self.status_line2.text())
-            target = max(w1, w2) + 4
+            target = max(w1, w2) + sc(4)
         else:
-            target = w1 + 4
+            target = w1 + sc(4)
         target = max(STATUS_MIN_W, min(target, STATUS_MAX_W))
         if self.status_box.width() != target:
             self.status_box.setFixedWidth(target)
@@ -1563,7 +1724,7 @@ class MainWindow(QWidget):
     def set_line1(self, text, color):
         self.status_line1.setText(text)
         self.status_line1.setStyleSheet(
-            f"color: {color}; font-size: 11px; background: transparent;"
+            f"color: {color}; font-size: {sc(11)}px; background: transparent;"
         )
 
     def set_line2(self, text, color=None):
@@ -1571,7 +1732,7 @@ class MainWindow(QWidget):
             color = ThemeManager.colors()['text_sub']
         self.status_line2.setText(text)
         self.status_line2.setStyleSheet(
-            f"color: {color}; font-size: 11px; background: transparent;"
+            f"color: {color}; font-size: {sc(11)}px; background: transparent;"
         )
 
     def _restore_status(self):
@@ -1644,8 +1805,25 @@ class MainWindow(QWidget):
 # main
 # ============================================================
 def main():
+    global UI_SCALE, SCALE_MULTIPLIER
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    settings = load_settings()
+    try:
+        SCALE_MULTIPLIER = float(settings.get("scale_multiplier", 1.0))
+    except (TypeError, ValueError):
+        SCALE_MULTIPLIER = 1.0
+    SCALE_MULTIPLIER = max(0.5, min(SCALE_MULTIPLIER, 3.0))
+
+    UI_SCALE = compute_ui_scale()
+
+    global WIN_WIDTH, WIN_HEIGHT, INPUT_WIDTH, STATUS_MIN_W, STATUS_MAX_W
+    WIN_WIDTH = sc(380)
+    WIN_HEIGHT = sc(44)
+    INPUT_WIDTH = sc(150)
+    STATUS_MIN_W = sc(56)
+    STATUS_MAX_W = sc(110)
 
     window = MainWindow()
     window.show()
