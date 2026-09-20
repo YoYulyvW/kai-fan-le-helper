@@ -35,28 +35,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install PySide2==5.15.2.1 pyinstaller==5.13.2
 
-      - name: Build EXE
-        run: pyinstaller --noconfirm --onefile --windowed --name KaiFanLe-Helper --win-private-assemblies --distpath build_output --workpath build_temp --specpath build_temp --clean main.py
+      - name: Build EXE (onedir)
+        run: pyinstaller --noconfirm --windowed --name KaiFanLe-Helper --win-private-assemblies --distpath build_output --workpath build_temp --specpath build_temp --clean main.py
 
-      - name: Replace dist (remove old, put new)
+      - name: Replace dist (remove old, put new zip)
         shell: pwsh
         run: |
           if (Test-Path dist) { Remove-Item -Recurse -Force dist }
           New-Item -ItemType Directory -Path dist | Out-Null
-          Copy-Item -Path "build_output\KaiFanLe-Helper.exe" `
-                    -Destination "dist\KaiFanLe-Helper.exe" -Force
-          (Get-FileHash "dist\KaiFanLe-Helper.exe" -Algorithm SHA256).Hash `
-            | Out-File -Encoding ASCII "dist\KaiFanLe-Helper.exe.sha256"
+          Compress-Archive -Path "build_output\KaiFanLe-Helper\*" `
+            -DestinationPath "dist\KaiFanLe-Helper.zip" -Force
+          (Get-FileHash "dist\KaiFanLe-Helper.zip" -Algorithm SHA256).Hash `
+            | Out-File -Encoding ASCII "dist\KaiFanLe-Helper.zip.sha256"
 
       - name: Commit & Push
         shell: pwsh
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f dist/KaiFanLe-Helper.exe dist/KaiFanLe-Helper.exe.sha256
+          git add -A dist
           git diff --staged --quiet
           if ($LASTEXITCODE -ne 0) {
-            git commit -m "build: update EXE [skip ci]"
+            git commit -m "build: update EXE (onedir zip) [skip ci]"
             git push
           } else {
             Write-Host "No changes to commit."
