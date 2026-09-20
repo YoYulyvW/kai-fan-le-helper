@@ -14,8 +14,7 @@ import json
 import random
 import socket
 import threading
-import urllib.request
-import urllib.error
+import http.client
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -559,25 +558,33 @@ def ping_phone(ip, port=PORT, timeout=HEARTBEAT_TIMEOUT):
         return False
 
 
-# 局域网直连，显式绕过系统代理（Clash 等代理会让局域网请求延迟 8-10 秒）
-_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-
+# 直接用 http.client，完全绕开系统代理与 urllib（PyInstaller 打包后
+# urllib 的代理处理可能失效，且系统代理会让局域网请求延迟 8-10 秒）
 def send_to_phone(ip, text, port=PORT, timeout=SEND_TIMEOUT):
-    url = f"http://{ip}:{port}/submit"
     body = json.dumps({"text": text}, ensure_ascii=False).encode('utf-8')
-    req = urllib.request.Request(url, data=body, method='POST')
-    req.add_header('Content-Type', 'application/json; charset=utf-8')
-    req.add_header('User-Agent', 'KaiFanLe-Helper/1.0')
-
+    conn = None
     try:
-        with _DIRECT_OPENER.open(req, timeout=timeout) as resp:
-            data = resp.read().decode('utf-8')
-            return json.loads(data)
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "message": f"HTTP {e.code}"}
+        conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        conn.request(
+            "POST", "/submit", body=body,
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": "KaiFanLe-Helper/1.0",
+                "Content-Length": str(len(body)),
+                "Connection": "close",
+            },
+        )
+        resp = conn.getresponse()
+        data = resp.read().decode('utf-8')
+        return json.loads(data)
     except Exception as e:
         return {"ok": False, "message": str(e)}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 # ============================================================
