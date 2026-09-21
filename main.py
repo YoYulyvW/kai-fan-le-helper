@@ -93,6 +93,7 @@ def sc(value):
 # ============================================================
 PORT = 8848
 BROADCAST_PORT = 8849
+HANDSHAKE_PORT = 8850   # TCP 主动握手端口（手机打开时主动连本机）
 SCAN_TIMEOUT = 0.3
 SCAN_MAX_WORKERS = 128
 HEARTBEAT_INTERVAL = 6
@@ -688,6 +689,83 @@ class BroadcastListener(QThread):
 
 
 # ============================================================
+# TCP 主动握手监听（手机打开/回前台时主动连本机，不依赖 UDP 广播）
+# ============================================================
+class HandshakeListener(QThread):
+    handshake_received = Signal(str, str)  # ip, device_name
+
+    def __init__(self, listen_port=HANDSHAKE_PORT):
+        super().__init__()
+        self.listen_port = listen_port
+        self._running = True
+        self._srv = None
+
+    def stop(self):
+        self._running = False
+        try:
+            if self._srv is not None:
+                self._srv.close()
+        except Exception:
+            pass
+
+    def run(self):
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(('0.0.0.0', self.listen_port))
+            srv.listen(5)
+            srv.settimeout(1.0)
+            self._srv = srv
+            print(f"[Handshake] ✅ 已监听 TCP :{self.listen_port}")
+        except Exception as e:
+            print(f"[Handshake] ❌ 监听失败: {e}")
+            return
+
+        while self._running:
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+            try:
+                conn.settimeout(2.0)
+                data = conn.recv(4096)
+                if b'\r\n\r\n' in data:
+                    body = data.split(b'\r\n\r\n', 1)[1]
+                else:
+                    body = data
+                try:
+                    msg = json.loads(body.decode('utf-8', errors='ignore'))
+                except Exception:
+                    msg = {}
+
+                if msg.get('magic') == 'KFL' and msg.get('action') == 'hello':
+                    ip = addr[0]
+                    name = msg.get('device') or '手机'
+                    self.handshake_received.emit(ip, name)
+                    resp = json.dumps({"ok": True}).encode('utf-8')
+                    conn.sendall(
+                        b'HTTP/1.1 200 OK\r\n'
+                        b'Content-Type: application/json\r\n'
+                        b'Content-Length: ' + str(len(resp)).encode() + b'\r\n'
+                        b'Connection: close\r\n\r\n' + resp)
+                else:
+                    conn.sendall(
+                        b'HTTP/1.1 400 Bad Request\r\n'
+                        b'Content-Length: 0\r\n'
+                        b'Connection: close\r\n\r\n')
+            except Exception:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+# ============================================================
 # 图标
 # ============================================================
 def create_icon():
@@ -1052,6 +1130,11 @@ class MainWindow(QWidget):
             self.broadcast_hit_signal)
         self._broadcast_listener.start()
 
+        self._handshake_listener = HandshakeListener(HANDSHAKE_PORT)
+        self._handshake_listener.handshake_received.connect(
+            self._on_handshake_received)
+        self._handshake_listener.start()
+
         ThemeManager.apply_mode()
         self.apply_theme()
 
@@ -1254,6 +1337,38 @@ class MainWindow(QWidget):
         if self._discovering:
             return
         self.start_discovery(silent=False)
+
+    # ---------- TCP 握手命中 ----------
+    def _on_handshake_received(self, ip, name):
+        for i, (dip, _) in enumerate(self.devices):
+            if dip == ip:
+                self.current_index = i
+                self._reset_backoff()
+                self._update_status()
+                self.send_btn.setEnabled(
+                    self.current_ip is not None
+                    and bool(self.input.text().strip()))
+                return
+
+        self.devices.append((ip, name))
+        self.devices.sort(
+            key=lambda x: tuple(int(p) for p in x[0].split('.')))
+        for i, (dip, _) in enumerate(self.devices):
+            if dip == ip:
+                self.current_index = i
+                break
+
+        self._reset_backoff()
+        self._update_status()
+        self.send_btn.setEnabled(
+            self.current_ip is not None
+            and bool(self.input.text().strip()))
+
+        if self.device_panel.isVisible():
+            self.device_panel.refresh(self.devices, self.current_index)
+
+        if not self.current_ip and not self._discovering:
+            self._trigger_immediate_scan()
 
     # ---------- 广播命中 ----------
     def _on_broadcast_hit(self, ip, port):
@@ -1530,6 +1645,11 @@ class MainWindow(QWidget):
         try:
             self._broadcast_listener.stop()
             self._broadcast_listener.wait(1000)
+        except Exception:
+            pass
+        try:
+            self._handshake_listener.stop()
+            self._handshake_listener.wait(1000)
         except Exception:
             pass
         self.tray.hide()
