@@ -1103,6 +1103,9 @@ class MainWindow(QWidget):
         self._scan_backoff_idx = 0
         self._scan_id = 0
 
+        settings = load_settings()
+        self._auto_scan = bool(settings.get("auto_scan", True))
+
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._restore_status)
@@ -1139,7 +1142,8 @@ class MainWindow(QWidget):
         self.apply_theme()
 
         self.position_top_right()
-        QTimer.singleShot(500, lambda: self.start_discovery(silent=False))
+        if self._auto_scan:
+            QTimer.singleShot(500, lambda: self.start_discovery(silent=False))
 
     @property
     def current_device(self):
@@ -1367,7 +1371,7 @@ class MainWindow(QWidget):
         if self.device_panel.isVisible():
             self.device_panel.refresh(self.devices, self.current_index)
 
-        if not self.current_ip and not self._discovering:
+        if self._auto_scan and not self.current_ip and not self._discovering:
             self._trigger_immediate_scan()
 
     # ---------- 广播命中 ----------
@@ -1474,7 +1478,7 @@ class MainWindow(QWidget):
     # ---------- 窗口激活触发扫描 ----------
     def showEvent(self, event):
         super().showEvent(event)
-        if not self.current_ip and not self._quitting:
+        if self._auto_scan and not self.current_ip and not self._quitting:
             QTimer.singleShot(50, self._trigger_immediate_scan)
 
     # ---------- 剪贴板 ----------
@@ -1512,7 +1516,7 @@ class MainWindow(QWidget):
             if self.history_panel.isVisible():
                 self.history_panel.refresh()
 
-            if not self.current_ip and not self._discovering:
+            if self._auto_scan and not self.current_ip and not self._discovering:
                 self._trigger_immediate_scan()
 
     # ---------- 托盘 ----------
@@ -1529,6 +1533,11 @@ class MainWindow(QWidget):
         rediscover_action = QAction("重新扫描", self)
         rediscover_action.triggered.connect(self._trigger_immediate_scan)
         menu.addAction(rediscover_action)
+
+        self.auto_scan_action = QAction("自动扫描", self, checkable=True)
+        self.auto_scan_action.setChecked(self._auto_scan)
+        self.auto_scan_action.triggered.connect(self._toggle_auto_scan)
+        menu.addAction(self.auto_scan_action)
 
         device_action = QAction("选择设备", self)
         device_action.triggered.connect(self._show_device_from_tray)
@@ -1582,6 +1591,20 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _toggle_auto_scan(self, checked):
+        self._auto_scan = bool(checked)
+        settings = load_settings()
+        settings["auto_scan"] = self._auto_scan
+        save_settings(settings)
+        if self._auto_scan:
+            # 开启时立即扫描一次
+            self._reset_backoff()
+            self._trigger_immediate_scan()
+        else:
+            # 关闭时停止定时扫描
+            if hasattr(self, '_scan_timer'):
+                self._scan_timer.stop()
 
     def _set_scale(self, mult):
         if abs(SCALE_MULTIPLIER - mult) < 1e-6:
@@ -1692,6 +1715,8 @@ class MainWindow(QWidget):
 
     def _run_scheduled_scan(self):
         if self._quitting:
+            return
+        if not self._auto_scan:
             return
         if self.current_ip:
             return
