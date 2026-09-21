@@ -103,6 +103,8 @@ SEND_TIMEOUT = 4
 MAX_HISTORY = 50
 
 SCAN_BACKOFF_SEQUENCE = [5, 5, 5, 5, 5, 5, 10, 15, 30, 60]
+IDLE_SCAN_INTERVAL = 3   # 无设备时的重扫间隔（秒）
+KNOWN_IPS_MAX = 10       # 最多记住多少个曾连上的 IP
 
 WIN_WIDTH = 380
 WIN_HEIGHT = 44
@@ -533,10 +535,24 @@ def check_ip(ip, port=PORT, timeout=SCAN_TIMEOUT):
         return None
 
 
-def scan_network(port=PORT):
+def scan_network(port=PORT, priority_ips=None):
     local_ip = get_local_ip()
     if not local_ip:
         return []
+
+    # 先快速探测"曾连上过的 IP"，命中就立即返回，避免整网段扫描
+    if priority_ips:
+        hits = []
+        with ThreadPoolExecutor(max_workers=min(len(priority_ips), 16)) as ex:
+            futures = {ex.submit(check_ip, ip, port, 0.5): ip
+                       for ip in priority_ips}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result:
+                    hits.append(result)
+        if hits:
+            hits.sort(key=lambda x: tuple(int(p) for p in x[0].split('.')))
+            return hits
 
     prefix = '.'.join(local_ip.split('.')[:3]) + '.'
     ips = [f"{prefix}{i}" for i in range(1, 255)]
@@ -601,14 +617,15 @@ def send_to_phone(ip, text, port=PORT, timeout=SEND_TIMEOUT):
 class DiscoveryWorker(QThread):
     finished_scan = Signal(list, int)
 
-    def __init__(self, port=PORT, worker_id=0):
+    def __init__(self, port=PORT, worker_id=0, priority_ips=None):
         super().__init__()
         self.port = port
         self.worker_id = worker_id
+        self.priority_ips = priority_ips or []
 
     def run(self):
         try:
-            result = scan_network(self.port)
+            result = scan_network(self.port, self.priority_ips)
         except Exception:
             result = []
         self.finished_scan.emit(result, self.worker_id)
@@ -1161,6 +1178,25 @@ class MainWindow(QWidget):
         d = self.current_device
         return d[1] if d else None
 
+    # ---------- 已知 IP（优先扫描） ----------
+    def _known_ips(self):
+        try:
+            return list(load_settings().get("known_ips", []))[:KNOWN_IPS_MAX]
+        except Exception:
+            return []
+
+    def _remember_ip(self, ip):
+        if not ip:
+            return
+        try:
+            settings = load_settings()
+            ips = [x for x in settings.get("known_ips", []) if x != ip]
+            ips.insert(0, ip)
+            settings["known_ips"] = ips[:KNOWN_IPS_MAX]
+            save_settings(settings)
+        except Exception:
+            pass
+
     # ---------- 退避辅助 ----------
     def _reset_backoff(self):
         self._scan_backoff_idx = 0
@@ -1344,6 +1380,7 @@ class MainWindow(QWidget):
 
     # ---------- TCP 握手命中 ----------
     def _on_handshake_received(self, ip, name):
+        self._remember_ip(ip)
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
                 self.current_index = i
@@ -1397,6 +1434,7 @@ class MainWindow(QWidget):
 
     def _add_device_from_broadcast(self, result):
         ip, name = result
+        self._remember_ip(ip)
 
         for i, (dip, _) in enumerate(self.devices):
             if dip == ip:
@@ -1720,6 +1758,7 @@ class MainWindow(QWidget):
             return
         if self.current_ip:
             return
+        # 无设备时每 IDLE_SCAN_INTERVAL 秒重扫一次
         self.start_discovery(silent=False)
 
     # ---------- 心跳 ----------
@@ -1769,8 +1808,7 @@ class MainWindow(QWidget):
                     self.devices, self.current_index)
 
             if not self.devices:
-                self._reset_backoff()
-                self._schedule_scan(2000)
+                self._schedule_scan(IDLE_SCAN_INTERVAL * 1000)
 
     # ---------- 扫描 ----------
     def start_discovery(self, silent=False):
@@ -1794,7 +1832,7 @@ class MainWindow(QWidget):
         self._scan_hard_timeout.timeout.connect(self._force_reset_scan)
         self._scan_hard_timeout.start(20000)
 
-        self._worker = DiscoveryWorker(PORT, wid)
+        self._worker = DiscoveryWorker(PORT, wid, priority_ips=self._known_ips())
         self._worker.finished_scan.connect(self.on_discovery_finished)
         self._worker.start()
 
@@ -1805,8 +1843,7 @@ class MainWindow(QWidget):
             if not self._scan_silent:
                 self._update_status()
             if not self.devices:
-                self._advance_backoff()
-                self._schedule_scan(self._current_backoff_seconds() * 1000)
+                self._schedule_scan(IDLE_SCAN_INTERVAL * 1000)
 
     @Slot(list, int)
     def on_discovery_finished(self, ips, worker_id):
@@ -1845,9 +1882,10 @@ class MainWindow(QWidget):
 
         if self.devices:
             self._reset_backoff()
+            for (dip, _) in self.devices:
+                self._remember_ip(dip)
         else:
-            self._advance_backoff()
-            self._schedule_scan(self._current_backoff_seconds() * 1000)
+            self._schedule_scan(IDLE_SCAN_INTERVAL * 1000)
 
     def _update_status(self):
         c = ThemeManager.colors()
