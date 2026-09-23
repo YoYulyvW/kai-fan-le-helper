@@ -2110,31 +2110,34 @@ class MainWindow(QWidget):
         self._ingest_share_text(text)
 
     def _ingest_share_text(self, text):
-        # 解析抖音分享文本 → 填入推送框 + 历史记录 + 自动推送
-        # 供剪贴板监听和快捷映射共用
+        # 解析抖音分享文本 → 填入推送框 + 历史记录 + 自动推送。
+        # 供剪贴板监听和快捷映射共用；命中返回 True。
         if not text:
-            return
+            return False
         if is_noise_clipboard(text):
-            return
+            return False
         if not looks_like_douyin_share(text):
-            return
+            return False
 
         title, is_fast = TitleParser.parse(text)
-        if title:
-            display = title + (" - 极速" if is_fast else "")
-            self.input.setText(display)
-            self.send_btn.setEnabled(self.current_ip is not None)
+        if not title:
+            return False
 
-            self.history.add(text, title)
-            if self.history_panel.isVisible():
-                self.history_panel.refresh()
+        display = title + (" - 极速" if is_fast else "")
+        self.input.setText(display)
+        self.send_btn.setEnabled(self.current_ip is not None)
 
-            if self._auto_scan and not self.current_ip and not self._discovering:
-                self._trigger_immediate_scan()
+        self.history.add(text, title)
+        if self.history_panel.isVisible():
+            self.history_panel.refresh()
 
-            # 已连接手机时自动推送
-            if self._auto_push and self.current_ip:
-                self.on_send()
+        if self._auto_scan and not self.current_ip and not self._discovering:
+            self._trigger_immediate_scan()
+
+        # 已连接手机时自动推送
+        if self._auto_push and self.current_ip:
+            self.on_send()
+        return True
 
     # ---------- 托盘 ----------
     def setup_tray(self):
@@ -2421,22 +2424,22 @@ class MainWindow(QWidget):
         if target_assistant is None:
             target_assistant = self._is_window_focused()
 
+        # 等效手动复制：命中分享文本则解析剧名填入推送框
+        parsed = self._ingest_share_text(text)
+
         if target_assistant:
-            self.input.setText(text)
-            self.input.selectAll()
-            self.input.setFocus()
-            self._update_send_btn_state()
-            self._flash(f"已填入 {text}", "#34C759")
+            if not parsed:
+                self.input.setText(text)
+                self.input.selectAll()
+                self.input.setFocus()
+                self._update_send_btn_state()
+            self._flash("已填入", "#34C759")
         else:
             self._paste_to_foreground(text)
 
     def _on_mapping_chosen(self, text):
         target = getattr(self, '_chooser_target_assistant', None)
         prev_hwnd = getattr(self, '_chooser_prev_hwnd', 0)
-
-        # 等效手动复制：解析剧名填入推送框 + 历史 + 自动推送
-        self._ingest_share_text(text)
-
         # 若目标是其它程序，恢复前台窗口后再粘贴
         if target is False and prev_hwnd:
             self._restore_foreground(prev_hwnd)
@@ -3032,6 +3035,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
