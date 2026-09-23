@@ -1141,6 +1141,10 @@ class MainWindow(QWidget):
         self._show_name_btn = bool(settings.get("show_name_btn", True))
         self._auto_push = bool(settings.get("auto_push", False))
         self._clear_clipboard = bool(settings.get("clear_clipboard", True))
+        self._clipboard_materialize = bool(
+            settings.get("clipboard_materialize", False))
+        self._materializing = False
+        self._last_materialized = ""
 
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -1546,10 +1550,37 @@ class MainWindow(QWidget):
         self._clip_timer = QTimer(self)
         self._clip_timer.setSingleShot(True)
         self._clip_timer.timeout.connect(self.on_clipboard_debounced)
+
+        self._materialize_timer = QTimer(self)
+        self._materialize_timer.setSingleShot(True)
+        self._materialize_timer.timeout.connect(self._materialize_clipboard)
+
         QApplication.clipboard().dataChanged.connect(self.on_clipboard_changed)
 
     def on_clipboard_changed(self):
         self._clip_timer.start(CLIPBOARD_DEBOUNCE)
+        if self._clipboard_materialize:
+            self._materialize_timer.start(60)
+
+    def _materialize_clipboard(self):
+        # 把延迟渲染的剪贴板数据立刻固化为纯文本，避免 Win7 下
+        # 源程序不应答导致"粘出旧内容"的问题。
+        if not self._clipboard_materialize or self._materializing:
+            return
+        try:
+            text = QApplication.clipboard().text() or ""
+        except Exception:
+            return
+        if not text or text == self._last_materialized:
+            return
+        self._materializing = True
+        try:
+            QApplication.clipboard().setText(text)
+            self._last_materialized = text
+        except Exception:
+            pass
+        finally:
+            self._materializing = False
 
     def on_clipboard_debounced(self):
         try:
@@ -1612,6 +1643,11 @@ class MainWindow(QWidget):
         self.clear_clip_action.setChecked(self._clear_clipboard)
         self.clear_clip_action.triggered.connect(self._toggle_clear_clipboard)
         menu.addAction(self.clear_clip_action)
+
+        self.materialize_action = QAction("剪贴板实体化(防粘出旧的)", self, checkable=True)
+        self.materialize_action.setChecked(self._clipboard_materialize)
+        self.materialize_action.triggered.connect(self._toggle_materialize)
+        menu.addAction(self.materialize_action)
 
         device_action = QAction("选择设备", self)
         device_action.triggered.connect(self._show_device_from_tray)
@@ -1690,6 +1726,14 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _toggle_materialize(self, checked):
+        self._clipboard_materialize = bool(checked)
+        settings = load_settings()
+        settings["clipboard_materialize"] = self._clipboard_materialize
+        save_settings(settings)
+        if self._clipboard_materialize:
+            self._materialize_timer.start(0)
 
     def _toggle_clear_clipboard(self, checked):
         self._clear_clipboard = bool(checked)
