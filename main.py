@@ -197,20 +197,23 @@ class _KeyboardHook(object):
 
     def _handler(self, nCode, wParam, lParam):
         try:
-            if nCode == 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            if nCode == 0:
                 kb = ctypes.cast(
                     lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-                # 忽略注入的合成按键（如本程序发出的 Ctrl+V），
-                # 否则会干扰自身注入，导致粘贴失效
+                # 忽略注入的合成按键（如本程序发出的 Ctrl+V）
                 if int(kb.flags) & 0x10:  # LLKHF_INJECTED
                     return _user32.CallNextHookEx(
                         None, nCode, wParam, lParam)
                 target = VK_MAP.get(self._hotkey_getter())
                 if target is not None and int(kb.vkCode) == target:
-                    now = time.time()
-                    if now - self._last_ts >= 0.3:
-                        self._last_ts = now
-                        self._callback()
+                    # 按下和抬起都屏蔽，避免 F1 传给前台程序
+                    if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                        now = time.time()
+                        if now - self._last_ts >= 0.3:
+                            self._last_ts = now
+                            self._callback()
+                    # 返回 1 表示已处理，阻止消息继续传递（屏蔽系统 F1）
+                    return 1
         except Exception:
             pass
         return _user32.CallNextHookEx(None, nCode, wParam, lParam)
