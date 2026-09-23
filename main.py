@@ -61,6 +61,7 @@ except Exception:
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 WM_SYSKEYDOWN = 0x0104
+WM_QUIT = 0x0012
 # F1=0x70 ... F12=0x7B
 VK_MAP = {"F%d" % i: 0x6F + i for i in range(1, 13)}
 
@@ -80,6 +81,19 @@ try:
         ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 except Exception:
     _HOOKPROC = None
+
+# 显式声明签名，确保 64 位下句柄不被截断（跨进程/远程场景必需）
+try:
+    _user32.SetWindowsHookExW.restype = ctypes.c_void_p
+    _user32.SetWindowsHookExW.argtypes = [
+        ctypes.c_int, _HOOKPROC, ctypes.c_void_p, wintypes.DWORD]
+    _user32.UnhookWindowsHookEx.restype = ctypes.c_bool
+    _user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+    _user32.CallNextHookEx.restype = ctypes.c_int
+    _user32.GetModuleHandleW.restype = ctypes.c_void_p
+    _user32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+except Exception:
+    pass
 
 
 # --- SendInput 结构（模拟键盘输入，兼容远程桌面） ---
@@ -166,42 +180,80 @@ def _send_ctrl_v():
 
 
 class _KeyboardHook(object):
-    """低级键盘钩子：可捕获所有按键（含远程桌面），热键值动态读取。"""
+    """低级键盘钩子：在独立线程安装并运行消息循环（与 keyboard 库同款）。
+
+    - 独立线程 + GetMessage 消息泵，保证跨进程/远程/注入按键都能捕获
+    - SetWindowsHookEx 传入 GetModuleHandleW(None)，兼容性更好
+    - 匹配热键时返回 1 屏蔽，阻止按键继续传给前台程序
+    """
 
     def __init__(self, hotkey_getter, callback):
         self._hotkey_getter = hotkey_getter
         self._callback = callback
         self._hook = None
         self._proc = None
+        self._thread = None
+        self._tid = 0
+        self._running = False
         self._last_ts = 0.0
 
     def install(self):
-        if _user32 is None or _HOOKPROC is None or self._hook is not None:
+        if _user32 is None or _HOOKPROC is None or self._thread is not None:
             return
-        try:
-            self._proc = _HOOKPROC(self._handler)
-            self._hook = _user32.SetWindowsHookExW(
-                WH_KEYBOARD_LL, self._proc, None, 0)
-        except Exception:
-            self._hook = None
-            self._proc = None
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def uninstall(self):
-        if self._hook is not None and _user32 is not None:
+        self._running = False
+        tid = self._tid
+        if tid:
             try:
-                _user32.UnhookWindowsHookEx(self._hook)
+                _user32.PostThreadMessageW(tid, WM_QUIT, 0, 0)
             except Exception:
                 pass
-        self._hook = None
-        self._proc = None
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._thread = None
+        self._tid = 0
+
+    def _run(self):
+        if not self._running:
+            return
+        try:
+            self._tid = int(_user32.GetCurrentThreadId())
+            hmod = _user32.GetModuleHandleW(None)
+            self._proc = _HOOKPROC(self._handler)
+            self._hook = _user32.SetWindowsHookExW(
+                WH_KEYBOARD_LL, self._proc, hmod, 0)
+            msg = wintypes.MSG()
+            while self._running:
+                ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if ret == 0 or ret == -1:
+                    break
+                _user32.TranslateMessage(ctypes.byref(msg))
+                _user32.DispatchMessageW(ctypes.byref(msg))
+        except Exception:
+            pass
+        finally:
+            if self._hook is not None and _user32 is not None:
+                try:
+                    _user32.UnhookWindowsHookEx(self._hook)
+                except Exception:
+                    pass
+            self._hook = None
+            self._proc = None
 
     def _handler(self, nCode, wParam, lParam):
         try:
             if nCode == 0:
                 kb = ctypes.cast(
                     lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-                # 注意：不过滤注入事件，否则远程桌面(ToDesk/UU)
-                # 在被控端注入的按键会被忽略，导致远程热键失效。
+                # 不过滤注入事件，否则远程桌面(ToDesk/UU)、无界鼠标
+                # 在被控端注入的按键会被忽略，导致热键失效。
                 # 自身发送的是 Ctrl+V(V=0x56)，不在热键范围，不会误触发。
                 target = VK_MAP.get(self._hotkey_getter())
                 if target is not None and int(kb.vkCode) == target:
