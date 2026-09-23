@@ -1779,18 +1779,31 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        self._log_hotkey_diag()
-
-        if self._is_window_focused():
-            # 窗口聚焦/鼠标在窗口内：直接填入输入框
+        if self.input.hasFocus():
+            # 助手输入框聚焦：直接填入输入框
             self.input.setText(name)
             self.input.selectAll()
             self.input.setFocus()
             self._update_send_btn_state()
             self._flash(f"已填入 {name}", "#34C759")
         else:
-            # 未聚焦：仅复制到剪贴板
+            # 其它程序聚焦：模拟 Ctrl+V 把名字粘贴进前台窗口
+            self._paste_to_foreground(name)
+
+    def _paste_to_foreground(self, name):
+        if not HAS_GLOBAL_HOTKEY:
             self._flash(f"已复制 {name}", "#34C759")
+            return
+        self._flash(f"已粘贴 {name}", "#34C759")
+
+        def do_paste():
+            try:
+                _keyboard.send('ctrl+v')
+            except Exception:
+                pass
+
+        # 稍延迟，确保剪贴板就绪、前台窗口稳定
+        QTimer.singleShot(40, do_paste)
 
     def _is_window_focused(self):
         # Frameless/Qt.Tool 置顶窗口在 Windows 下通常带 WS_EX_NOACTIVATE，
