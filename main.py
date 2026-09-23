@@ -49,6 +49,15 @@ except Exception:
     _user32 = None
     HAS_GLOBAL_HOTKEY = False
 
+# 粘贴发送优先用 keyboard 库（其 SendInput 实现经验证可正常粘贴），
+# 不可用时回退到下面的自研 SendInput
+try:
+    import keyboard as _keyboard
+    HAS_KEYBOARD = True
+except Exception:
+    _keyboard = None
+    HAS_KEYBOARD = False
+
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 WM_SYSKEYDOWN = 0x0104
@@ -138,7 +147,14 @@ def _send_key_event(vk, keyup=False):
 
 
 def _send_ctrl_v():
-    # 用 SendInput 模拟 Ctrl+V（兼容 Win7 及远程桌面）
+    # 优先用 keyboard 库发送（其粘贴在多数环境验证可用）
+    if HAS_KEYBOARD:
+        try:
+            _keyboard.send('ctrl+v')
+            return
+        except Exception:
+            pass
+    # 回退：自研 SendInput
     if _user32 is None:
         return
     VK_CONTROL = 0x11
