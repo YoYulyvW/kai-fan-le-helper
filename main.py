@@ -438,6 +438,10 @@ DEFAULT_MAPPING = {
 }
 MAPPING_FILE_NAME = "mappings.txt"
 
+# 热键看门狗：每 15 秒检查一次；每 12 轮（约 3 分钟）强制重装一次
+HOTKEY_WATCHDOG_INTERVAL = 15
+HOTKEY_WATCHDOG_FORCE_EVERY = 12
+
 
 def _mapping_base_dir():
     if getattr(sys, 'frozen', False):
@@ -2366,6 +2370,37 @@ class MainWindow(QWidget):
                 pass
         self._kb_handle = None
 
+    def _hotkey_watchdog(self):
+        # 检测 keyboard 监听线程是否存活；死了就重置并重装热键。
+        # 另外每隔若干轮强制重装，防止底层钩子被系统静默移除。
+        if not HAS_KEYBOARD:
+            return
+        if not (self._hotkey_enabled or self._mapping_enabled):
+            return
+        try:
+            lst = getattr(_keyboard, '_listener', None)
+            if lst is None:
+                return
+            dead = False
+            if not getattr(lst, 'listening', False):
+                dead = True
+            thread = getattr(lst, 'listening_thread', None)
+            if thread is not None and not thread.is_alive():
+                dead = True
+
+            self._watchdog_ticks += 1
+            force = (self._watchdog_ticks % HOTKEY_WATCHDOG_FORCE_EVERY == 0)
+            if dead:
+                try:
+                    lst.listening = False
+                except Exception:
+                    pass
+            if dead or force:
+                self._apply_hotkey_enabled()
+                self._apply_mapping_enabled()
+        except Exception:
+            pass
+
     def _apply_mapping_enabled(self):
         # 注销旧的映射
         for key, handle in list(self._mapping_handles.items()):
@@ -2702,6 +2737,12 @@ class MainWindow(QWidget):
         self._theme_poll_timer.timeout.connect(self._poll_system_theme)
         self._theme_poll_timer.start(THEME_POLL_INTERVAL)
 
+        # 热键看门狗：防止 ToDesk 等场景下监听线程静默死亡/钩子被移除
+        self._watchdog_ticks = 0
+        self._hotkey_watchdog_timer = QTimer(self)
+        self._hotkey_watchdog_timer.timeout.connect(self._hotkey_watchdog)
+        self._hotkey_watchdog_timer.start(HOTKEY_WATCHDOG_INTERVAL * 1000)
+
     def _poll_system_theme(self):
         if ThemeManager.mode != "auto":
             return
@@ -3035,6 +3076,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
