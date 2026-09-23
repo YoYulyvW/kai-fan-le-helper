@@ -1497,6 +1497,7 @@ class HistoryPanel(QWidget):
 # ============================================================
 class MappingChooser(QWidget):
     item_selected = Signal(str)
+    closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
@@ -1506,6 +1507,14 @@ class MappingChooser(QWidget):
         self._all = []       # [(title, text)]
         self._build()
         self.apply_theme()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # 弹窗关闭后通知主窗口重装热键（远程下弹窗可能破坏键盘钩子）
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
 
     def _build(self):
         self.container = QWidget(self)
@@ -2631,6 +2640,26 @@ class MainWindow(QWidget):
         else:
             self._apply_mapping_text(text, target)
 
+    def _on_chooser_closed(self):
+        # 弹窗关闭后延迟重装全部热键，修复远程(ToDesk/效卫投屏)下
+        # 弹窗破坏键盘钩子导致热键集体失效的问题
+        QTimer.singleShot(120, self._reinstall_all_hotkeys)
+
+    def _reinstall_all_hotkeys(self):
+        try:
+            # 重置 keyboard 监听，强制重建底层钩子
+            if HAS_KEYBOARD:
+                try:
+                    lst = getattr(_keyboard, '_listener', None)
+                    if lst is not None:
+                        lst.listening = False
+                except Exception:
+                    pass
+            self._apply_hotkey_enabled()
+            self._apply_mapping_enabled()
+        except Exception:
+            pass
+
     def _get_foreground_hwnd(self):
         try:
             import ctypes
@@ -2651,6 +2680,8 @@ class MainWindow(QWidget):
             self.mapping_chooser = MappingChooser()
             self.mapping_chooser.item_selected.connect(
                 self._on_mapping_chosen)
+            self.mapping_chooser.closed.connect(
+                self._on_chooser_closed)
         self.mapping_chooser.refresh(items)
         self.mapping_chooser.move(self.mapToGlobal(
             QPoint(0, self.height() + sc(6))))
@@ -3240,6 +3271,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
