@@ -73,17 +73,60 @@ except Exception:
     _HOOKPROC = None
 
 
+# --- SendInput 结构（模拟键盘输入，兼容远程桌面） ---
+ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(
+    ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [
+        ("ki", _KEYBDINPUT),
+        ("padding", ctypes.c_byte * 24),
+    ]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("u", _INPUT_UNION),
+    ]
+
+
+INPUT_KEYBOARD = 1
+KEYEVENTF_KEYUP = 0x0002
+
+
+def _send_key_event(vk, keyup=False):
+    inp = _INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.u.ki.wVk = vk
+    inp.u.ki.wScan = 0
+    inp.u.ki.dwFlags = KEYEVENTF_KEYUP if keyup else 0
+    inp.u.ki.time = 0
+    inp.u.ki.dwExtraInfo = 0
+    _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
 def _send_ctrl_v():
-    # 用原生 keybd_event 发送 Ctrl+V（Win7 兼容）
+    # 用 SendInput 模拟 Ctrl+V（兼容 Win7 及远程桌面）
     if _user32 is None:
         return
     VK_CONTROL = 0x11
     VK_V = 0x56
-    KEYEVENTF_KEYUP = 0x0002
-    _user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    _user32.keybd_event(VK_V, 0, 0, 0)
-    _user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-    _user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+    _send_key_event(VK_CONTROL, False)
+    _send_key_event(VK_V, False)
+    _send_key_event(VK_V, True)
+    _send_key_event(VK_CONTROL, True)
 
 
 class _KeyboardHook(object):
