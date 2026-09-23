@@ -147,10 +147,9 @@ class _INPUT(ctypes.Structure):
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_UNICODE = 0x0004
 
 
-def _make_key_input(vk, keyup=False):
+def _send_key_event(vk, keyup=False):
     inp = _INPUT()
     inp.type = INPUT_KEYBOARD
     inp.u.ki.wVk = vk
@@ -158,99 +157,26 @@ def _make_key_input(vk, keyup=False):
     inp.u.ki.dwFlags = KEYEVENTF_KEYUP if keyup else 0
     inp.u.ki.time = 0
     inp.u.ki.dwExtraInfo = 0
-    return inp
-
-
-def _send_key_event(vk, keyup=False):
-    inp = _make_key_input(vk, keyup)
     _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
-def _make_unicode_input(ch, keyup=False):
-    inp = _INPUT()
-    inp.type = INPUT_KEYBOARD
-    inp.u.ki.wVk = 0
-    inp.u.ki.wScan = ord(ch)
-    flags = KEYEVENTF_UNICODE
-    if keyup:
-        flags |= KEYEVENTF_KEYUP
-    inp.u.ki.dwFlags = flags
-    inp.u.ki.time = 0
-    inp.u.ki.dwExtraInfo = 0
-    return inp
-
-
-def _release_modifiers():
-    # 释放可能卡住的修饰键（Ctrl/Shift/Alt/Win），
-    # 避免跨机场景下修饰键状态错乱
-    if _user32 is None:
-        return
-    for vk in (0x11, 0x10, 0x12, 0x5B, 0x5C):
-        inp = _make_key_input(vk, True)
-        _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
-
-
-def _clear_stuck_keys():
-    # 补发 V 与所有修饰键的抬起事件，防止跨机(无界鼠标/远程)
-    # 丢失 keyup 导致按键卡住（表现为 vvvvvv 无限输入）
-    if _user32 is None:
-        return
-    for vk in (0x56, 0x11, 0x10, 0x12, 0x5B, 0x5C):
-        inp = _make_key_input(vk, True)
-        _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
-
-
-def _send_text_unicode(text):
-    # 用 KEYEVENTF_UNICODE 直接注入文本，不依赖 Ctrl/剪贴板，
-    # 每个字符 down/up 成对，一次原子提交，彻底避免远程/无界鼠标
-    # 下修饰键丢失导致的 "vvvv" 或 "只弹出 v" 问题。
-    if _user32 is None or not text:
-        return False
-    _release_modifiers()
-    inputs = []
-    for ch in text:
-        inputs.append(_make_unicode_input(ch, False))
-        inputs.append(_make_unicode_input(ch, True))
-    n = len(inputs)
-    arr = (_INPUT * n)()
-    for i, inp in enumerate(inputs):
-        arr[i] = inp
-    try:
-        sent = _user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(_INPUT))
-        return sent == n
-    except Exception:
-        return False
-
-
 def _send_ctrl_v():
-    # 剪贴板 Ctrl+V：首选 keyboard 库发送（用户环境验证远程可用），
-    # 回退到原子批次 SendInput。
+    # 优先用 keyboard 库发送（其粘贴在多数环境验证可用）
     if HAS_KEYBOARD:
         try:
-            _release_modifiers()
             _keyboard.send('ctrl+v')
-            time.sleep(0.06)
-            # 补发抬起，防止跨机丢 keyup 导致 vvvv 卡键
-            _clear_stuck_keys()
             return
         except Exception:
             pass
+    # 回退：自研 SendInput
     if _user32 is None:
         return
     VK_CONTROL = 0x11
     VK_V = 0x56
-    _release_modifiers()
-    arr = (_INPUT * 4)()
-    arr[0] = _make_key_input(VK_CONTROL, False)
-    arr[1] = _make_key_input(VK_V, False)
-    arr[2] = _make_key_input(VK_V, True)
-    arr[3] = _make_key_input(VK_CONTROL, True)
-    try:
-        _user32.SendInput(4, ctypes.byref(arr), ctypes.sizeof(_INPUT))
-        time.sleep(0.06)
-        _clear_stuck_keys()
-    except Exception:
-        pass
+    _send_key_event(VK_CONTROL, False)
+    _send_key_event(VK_V, False)
+    _send_key_event(VK_V, True)
+    _send_key_event(VK_CONTROL, True)
 
 
 class _KeyboardHook(object):
@@ -2184,7 +2110,6 @@ class MainWindow(QWidget):
             # 在独立线程发送，避免主线程键盘钩子上下文干扰注入
             def worker():
                 try:
-                    # 用剪贴板 + Ctrl+V（远程/无界鼠标下文本传输可靠）
                     _send_ctrl_v()
                 except Exception:
                     pass
