@@ -46,6 +46,9 @@ jobs:
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item -Path "build_output\KaiFanLe-Helper.exe" `
                     -Destination "dist\KaiFanLe-Helper.exe" -Force
+          if (Test-Path "mappings.txt") {
+            Copy-Item -Path "mappings.txt" -Destination "dist\mappings.txt" -Force
+          }
           (Get-FileHash "dist\KaiFanLe-Helper.exe" -Algorithm SHA256).Hash `
             | Out-File -Encoding ASCII "dist\KaiFanLe-Helper.exe.sha256"
 
@@ -54,7 +57,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A dist
+          git add -A dist mappings.txt
           git diff --staged --quiet
           if ($LASTEXITCODE -ne 0) {
             git commit -m "build: update EXE (onefile) [skip ci]"
