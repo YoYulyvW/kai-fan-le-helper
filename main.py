@@ -1779,15 +1779,26 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        if self.input.hasFocus():
-            # 输入框聚焦：直接填入
+        if self.input.hasFocus() or self._window_is_foreground():
+            # 窗口处于前台：直接填入输入框
             self.input.setText(name)
             self.input.selectAll()
+            self.input.setFocus()
             self._update_send_btn_state()
             self._flash(f"已填入 {name}", "#34C759")
         else:
-            # 未聚焦：仅复制到剪贴板
+            # 未在前台：仅复制到剪贴板
             self._flash(f"已复制 {name}", "#34C759")
+
+    def _window_is_foreground(self):
+        # Frameless/Qt.Tool 窗口下 Qt 的 isActiveWindow 不可靠，
+        # 直接用 Win32 前台窗口句柄判断
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            return ctypes.windll.user32.GetForegroundWindow() == hwnd
+        except Exception:
+            return self.isActiveWindow()
 
     def _set_hotkey(self, key):
         if key == self._hotkey:
