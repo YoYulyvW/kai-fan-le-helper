@@ -2010,8 +2010,10 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        if self.input.hasFocus():
-            # 助手输入框聚焦：直接填入输入框
+        # 注意：本窗口带 WS_EX_NOACTIVATE，Qt 的 hasFocus 恒为真，
+        # 必须用 Win32 前台窗口/鼠标位置判断，否则永远走"填入"分支
+        if self._is_window_focused():
+            # 助手窗口前台/鼠标在内：直接填入输入框
             self.input.setText(name)
             self.input.selectAll()
             self.input.setFocus()
