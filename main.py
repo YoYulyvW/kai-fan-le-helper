@@ -203,25 +203,38 @@ def _send_scan_batch(items):
         return 0
 
 
+def _send_scan_step(scan, keyup=False):
+    if _user32 is None:
+        return 0
+    inp = _make_scan_input(scan, keyup)
+    try:
+        return int(_user32.SendInput(
+            1, ctypes.byref(inp), ctypes.sizeof(_INPUT)))
+    except Exception:
+        return 0
+
+
 def _send_ctrl_v():
     VK_CONTROL = 0x11
     VK_V = 0x56
 
-    # 主路径：扫描码 + 一次原子批次（Ctrl↓ V↓ V↑ Ctrl↑）
+    # 主路径：扫描码分步发送 + 拉开 Ctrl 保持时间。
+    # 无界鼠标(MWB)等会把按键逐个转发到对端，若 4 个事件瞬时发完，
+    # 对端来不及同步 Ctrl 按下状态就收到 V，导致只剩 v。
+    # 因此每步之间加延迟，给跨机同步留出时间。
     if _user32 is not None:
         ctrl = _vk_to_scan(VK_CONTROL)
         v = _vk_to_scan(VK_V)
         if ctrl and v:
-            # 批次前微小延迟，等待焦点/剪贴板就绪
-            time.sleep(0.01)
-            items = [
-                (ctrl, False),   # Ctrl down
-                (v, False),      # V down
-                (v, True),       # V up
-                (ctrl, True),    # Ctrl up
-            ]
-            if _send_scan_batch(items) == len(items):
-                return
+            time.sleep(0.01)          # 批次前：等焦点/剪贴板就绪
+            _send_scan_step(ctrl, False)   # Ctrl down
+            time.sleep(0.04)          # 等对端同步 Ctrl 按下
+            _send_scan_step(v, False)      # V down
+            time.sleep(0.02)
+            _send_scan_step(v, True)       # V up
+            time.sleep(0.02)
+            _send_scan_step(ctrl, True)    # Ctrl up
+            return
 
     # 回退 1：keyboard 库
     if HAS_KEYBOARD:
