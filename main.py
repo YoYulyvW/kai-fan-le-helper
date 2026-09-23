@@ -21,7 +21,7 @@ from datetime import datetime
 
 from PySide2.QtCore import (
     Qt, QTimer, QThread, Signal, Slot, QPoint, QProcess,
-    QAbstractNativeEventFilter
+    QAbstractNativeEventFilter, QEvent
 )
 from PySide2.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient,
@@ -1499,13 +1499,25 @@ class MappingChooser(QWidget):
     item_selected = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        # 不用 Qt.Popup：Popup 会独占键盘 grab，导致热键（钩子/消息/轮询）
+        # 在弹窗隐藏后集体失效。改用普通 Tool 窗口 + 失焦自动隐藏。
+        super().__init__(
+            parent, Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAutoFillBackground(False)
         self.setFixedWidth(WIN_WIDTH)
         self._all = []       # [(title, text)]
         self._build()
         self.apply_theme()
+
+    def event(self, ev):
+        # 失焦自动隐藏
+        try:
+            if ev.type() == QEvent.WindowDeactivate:
+                self.hide()
+        except Exception:
+            pass
+        return super().event(ev)
 
     def _build(self):
         self.container = QWidget(self)
@@ -1549,6 +1561,8 @@ class MappingChooser(QWidget):
     def showEvent(self, event):
         self.apply_theme()
         super().showEvent(event)
+        self.raise_()
+        self.activateWindow()
         self.search.setFocus()
 
     def apply_theme(self):
@@ -3240,6 +3254,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
