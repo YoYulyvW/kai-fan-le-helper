@@ -430,8 +430,76 @@ THEME_POLL_INTERVAL = 2000
 DEFAULT_HOTKEY = "F1"
 HOTKEY_OPTIONS = [f"F{i}" for i in range(1, 13)]
 
-# 快捷映射：按键 → 固定文本
-MAPPING_KEYS = {"F2": "懂车帝", "F3": "易车", "F4": "巨量引擎"}
+# 快捷映射默认值（配置文件缺失时使用）
+DEFAULT_MAPPING = {
+    "F2": ["懂车帝"],
+    "F3": ["易车"],
+    "F4": ["巨量引擎"],
+}
+MAPPING_FILE_NAME = "mappings.txt"
+
+
+def _mapping_base_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _mapping_config_path():
+    exe_path = os.path.join(_mapping_base_dir(), MAPPING_FILE_NAME)
+    if os.path.exists(exe_path):
+        return exe_path
+    user_path = os.path.join(os.path.expanduser("~"), "." + MAPPING_FILE_NAME)
+    if os.path.exists(user_path):
+        return user_path
+    try:
+        _write_default_mapping(exe_path)
+        return exe_path
+    except Exception:
+        return user_path
+
+
+def _write_default_mapping(path):
+    lines = [
+        "# 开饭了助手 - 快捷映射配置",
+        "# [按键] 开始一个节点，节点下每行一条内容",
+        "# 单条内容 -> 按热键直接粘贴；多条内容 -> 弹窗选择",
+        "# F1 固定为生成名字，此处写 F1 会被忽略",
+        "",
+    ]
+    for k, items in DEFAULT_MAPPING.items():
+        lines.append("[%s]" % k)
+        lines.extend(items)
+        lines.append("")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def load_mapping_config():
+    path = _mapping_config_path()
+    result = {}
+    try:
+        if path and os.path.exists(path):
+            cur = None
+            with open(path, "r", encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.rstrip("\r\n").strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    m = re.match(r'^\[(.+?)\]$', line)
+                    if m:
+                        cur = m.group(1).strip().upper()
+                        if cur not in result:
+                            result[cur] = []
+                        continue
+                    if cur is not None:
+                        result[cur].append(line)
+    except Exception:
+        pass
+    result = {k: v for k, v in result.items() if v}
+    if not result:
+        result = dict(DEFAULT_MAPPING)
+    return result
 
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
@@ -1398,6 +1466,142 @@ class HistoryPanel(QWidget):
 
 
 # ============================================================
+# 快捷映射选择弹窗（多条内容时）
+# ============================================================
+class MappingChooser(QWidget):
+    item_selected = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
+        self.setFixedWidth(WIN_WIDTH)
+        self._all = []       # [(title, text)]
+        self._build()
+        self.apply_theme()
+
+    def _build(self):
+        self.container = QWidget(self)
+        self.container.setObjectName("container")
+        self.container.setAttribute(Qt.WA_StyledBackground, True)
+
+        self.title = QLabel("📌 选择要粘贴的内容（双击）")
+        self.title.setObjectName("title")
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索剧名...")
+        self.search.setFixedHeight(sc(26))
+        self.search.textChanged.connect(self._apply_filter)
+
+        self.list = QListWidget()
+        self.list.setFrameShape(QFrame.NoFrame)
+        self.list.setAutoFillBackground(False)
+        self.list.viewport().setAutoFillBackground(False)
+        self.list.itemDoubleClicked.connect(self._on_double_click)
+
+        self.close_btn = QPushButton("关闭")
+        self.close_btn.setObjectName("closeBtn")
+        self.close_btn.setFixedHeight(sc(26))
+        self.close_btn.clicked.connect(self.hide)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.addStretch()
+        bottom.addWidget(self.close_btn)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(sc(12), sc(10), sc(12), sc(10))
+        layout.setSpacing(sc(6))
+        layout.addWidget(self.title)
+        layout.addWidget(self.search)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(bottom)
+        self.container.setLayout(layout)
+        self.container.setGeometry(0, 0, WIN_WIDTH, sc(360))
+
+    def showEvent(self, event):
+        self.apply_theme()
+        super().showEvent(event)
+        self.search.setFocus()
+
+    def apply_theme(self):
+        c = ThemeManager.colors()
+        self.container.setStyleSheet(f"""
+            #container {{
+                background: {c['bg_solid']};
+                border-radius: {sc(12)}px;
+                border: 1px solid {c['border']};
+            }}
+            QLabel#title {{
+                color: {c['text']};
+                font-size: {sc(13)}px; font-weight: 600;
+                padding: {sc(4)}px; background: transparent;
+            }}
+            QLineEdit {{
+                background: {c['input_bg']};
+                border: none; border-radius: {sc(8)}px;
+                color: {c['text']}; font-size: {sc(13)}px;
+                padding: 0 {sc(10)}px;
+                selection-background-color: {c['list_sel']};
+            }}
+            QListWidget {{
+                background: transparent; border: none; outline: none;
+                color: {c['text']}; font-size: {sc(13)}px;
+            }}
+            QListWidget::item {{
+                padding: {sc(8)}px {sc(14)}px;
+                border-radius: {sc(6)}px;
+                margin: {sc(2)}px {sc(6)}px;
+            }}
+            QListWidget::item:selected {{
+                background: {c['list_sel']}; color: #FFFFFF;
+            }}
+            QListWidget::item:hover {{ background: {c['list_hover']}; }}
+            QPushButton#closeBtn {{
+                background: {c['input_bg']}; color: {c['text']};
+                border: none; border-radius: {sc(8)}px;
+                padding: 0 {sc(14)}px; font-size: {sc(12)}px;
+            }}
+            QPushButton#closeBtn:hover {{ background: {c['hover_strong']}; }}
+        """)
+
+    def refresh(self, items):
+        self._all = []
+        for it in items:
+            title, _fast = TitleParser.parse(it)
+            if not title:
+                title = it[:20]
+            self._all.append((title, it))
+        self.search.clear()
+        self._populate(self._all)
+
+    def _apply_filter(self, kw):
+        kw = (kw or "").strip().lower()
+        if not kw:
+            self._populate(self._all)
+        else:
+            self._populate([t for t in self._all if kw in t[0].lower()])
+
+    def _populate(self, pairs):
+        self.list.clear()
+        if not pairs:
+            it = QListWidgetItem("(无匹配内容)")
+            it.setFlags(Qt.NoItemFlags)
+            self.list.addItem(it)
+            return
+        for title, full in pairs:
+            item = QListWidgetItem(title)
+            item.setData(Qt.UserRole, full)
+            self.list.addItem(item)
+
+    def _on_double_click(self, item):
+        full = item.data(Qt.UserRole)
+        if full:
+            self.item_selected.emit(full)
+            self.hide()
+
+
+# ============================================================
 # 主窗口
 # ============================================================
 class MainWindow(QWidget):
@@ -1446,6 +1650,7 @@ class MainWindow(QWidget):
         self._hotkey_enabled = bool(settings.get("hotkey_enabled", True))
         self._mapping_enabled = bool(settings.get("mapping_enabled", False))
         self._mapping_handles = {}
+        self._mappings = load_mapping_config()
         self._show_name_btn = bool(settings.get("show_name_btn", True))
         self._auto_push = bool(settings.get("auto_push", False))
         self._clear_clipboard = bool(settings.get("clear_clipboard", True))
@@ -2018,7 +2223,7 @@ class MainWindow(QWidget):
         hotkey_menu.addAction(self.hotkey_enabled_action)
 
         self.mapping_action = QAction(
-            "启用快捷映射 (F2懂车帝/F3易车/F4巨量引擎)", self, checkable=True)
+            "启用快捷映射 (读取 mappings.txt)", self, checkable=True)
         self.mapping_action.setChecked(self._mapping_enabled)
         self.mapping_action.triggered.connect(self._toggle_mapping_enabled)
         hotkey_menu.addAction(self.mapping_action)
@@ -2164,14 +2369,18 @@ class MainWindow(QWidget):
         if not (HAS_KEYBOARD and self._mapping_enabled):
             return
 
-        for key, text in MAPPING_KEYS.items():
+        self._mappings = load_mapping_config()
+        for key in self._mappings.keys():
+            # F1 固定给"生成名字"，配置里忽略
+            if key == "F1":
+                continue
             # 与主热键冲突时跳过（避免争抢同一按键）
             if self._hotkey_enabled and key == self._hotkey:
                 continue
             try:
                 h = _keyboard.add_hotkey(
                     key.lower(),
-                    (lambda t=text: self.mapping_hotkey_signal.emit(t)),
+                    (lambda k=key: self.mapping_hotkey_signal.emit(k)),
                     suppress=True)
                 self._mapping_handles[key] = h
             except Exception:
@@ -2184,7 +2393,16 @@ class MainWindow(QWidget):
         save_settings(settings)
         self._apply_mapping_enabled()
 
-    def _on_mapping_hotkey(self, text):
+    def _on_mapping_hotkey(self, key):
+        items = self._mappings.get(key) or []
+        if not items:
+            return
+        if len(items) == 1:
+            self._apply_mapping_text(items[0])
+        else:
+            self._show_mapping_chooser(items)
+
+    def _apply_mapping_text(self, text):
         try:
             QApplication.clipboard().setText(text)
             self.last_clipboard = text
@@ -2199,6 +2417,16 @@ class MainWindow(QWidget):
             self._flash(f"已填入 {text}", "#34C759")
         else:
             self._paste_to_foreground(text)
+
+    def _show_mapping_chooser(self, items):
+        if not hasattr(self, 'mapping_chooser'):
+            self.mapping_chooser = MappingChooser()
+            self.mapping_chooser.item_selected.connect(
+                self._apply_mapping_text)
+        self.mapping_chooser.refresh(items)
+        self.mapping_chooser.move(self.mapToGlobal(
+            QPoint(0, self.height() + sc(6))))
+        self.mapping_chooser.show()
 
     def _toggle_hotkey_enabled(self, checked):
         self._hotkey_enabled = bool(checked)
@@ -2763,3 +2991,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
