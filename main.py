@@ -1597,8 +1597,8 @@ class MappingChooser(QWidget):
     def _on_double_click(self, item):
         full = item.data(Qt.UserRole)
         if full:
-            self.item_selected.emit(full)
             self.hide()
+            self.item_selected.emit(full)
 
 
 # ============================================================
@@ -2400,16 +2400,22 @@ class MainWindow(QWidget):
         if len(items) == 1:
             self._apply_mapping_text(items[0])
         else:
+            # 弹窗出现前记录目标状态与前台窗口，避免弹窗抢焦点导致误判
+            self._chooser_target_assistant = self._is_window_focused()
+            self._chooser_prev_hwnd = self._get_foreground_hwnd()
             self._show_mapping_chooser(items)
 
-    def _apply_mapping_text(self, text):
+    def _apply_mapping_text(self, text, target_assistant=None):
         try:
             QApplication.clipboard().setText(text)
             self.last_clipboard = text
         except Exception:
             pass
 
-        if self._is_window_focused():
+        if target_assistant is None:
+            target_assistant = self._is_window_focused()
+
+        if target_assistant:
             self.input.setText(text)
             self.input.selectAll()
             self.input.setFocus()
@@ -2418,11 +2424,36 @@ class MainWindow(QWidget):
         else:
             self._paste_to_foreground(text)
 
+    def _on_mapping_chosen(self, text):
+        target = getattr(self, '_chooser_target_assistant', None)
+        prev_hwnd = getattr(self, '_chooser_prev_hwnd', 0)
+        # 若目标是其它程序，恢复前台窗口后再粘贴
+        if target is False and prev_hwnd:
+            self._restore_foreground(prev_hwnd)
+            QTimer.singleShot(60, lambda: self._apply_mapping_text(text, target))
+        else:
+            self._apply_mapping_text(text, target)
+
+    def _get_foreground_hwnd(self):
+        try:
+            import ctypes
+            return int(ctypes.windll.user32.GetForegroundWindow())
+        except Exception:
+            return 0
+
+    def _restore_foreground(self, hwnd):
+        try:
+            import ctypes
+            if hwnd:
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
     def _show_mapping_chooser(self, items):
         if not hasattr(self, 'mapping_chooser'):
             self.mapping_chooser = MappingChooser()
             self.mapping_chooser.item_selected.connect(
-                self._apply_mapping_text)
+                self._on_mapping_chosen)
         self.mapping_chooser.refresh(items)
         self.mapping_chooser.move(self.mapToGlobal(
             QPoint(0, self.height() + sc(6))))
@@ -2991,5 +3022,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
