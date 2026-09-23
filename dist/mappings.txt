@@ -1,0 +1,44 @@
+# 开饭了助手 · 快捷映射配置
+# [按键] 开始一个节点，节点下每行一条内容（回车即新增一条）
+# 单条内容 → 按热键直接粘贴；多条内容 → 弹窗选择（显示解析出的剧名）
+# F1 固定为"生成名字"，配置里写 F1 会被忽略
+
+[F2]
+懂车帝
+
+[F3]
+易车
+
+[F4]
+巨量引擎
+
+[F9]
+3.05 :9pm 06/19 kCh:/ h@o.QX 嘉禾  https://v.douyin.com/44XKjOj49Mc/ 复制此链接，打开Dou音搜索，直接观看视频！
+9.46 Y@M.WZ 04/29 hba:/ :5pm 寸土生禾  https://v.douyin.com/xu238rwwpo0/ 复制此链接，打开Dou音搜索，直接观看视频！
+3.82 g@b.Nw 08/15 :5pm Qkp:/ 染云间  https://v.douyin.com/f9-yihsuQyU/ 复制此链接，打开Dou音搜索，直接观看视频！
+4.64 C@u.fo :3pm 08/15 sEh:/ 沃土丹心  https://v.douyin.com/yHsLqaVKnp8/ 复制此链接，打开Dou音搜索，直接观看视频！
+4.12 :1pm 05/15 p@d.AG Tlp:/ 药香满园  https://v.douyin.com/hgTlnzY4pbE/ 复制此链接，打开Dou音搜索，直接观看视频！
+2.56 :8pm o@d.aA 02/22 TYM:/ 药谷仁心  https://v.douyin.com/GwGFvHRC4Ks/ 复制此链接，打开Dou音搜索，直接观看视频！
+1.51 09/09 nDU:/ X@M.Ji :9pm 香道传家，我在南山开香坊  https://v.douyin.com/CKB_c34QLkc/ 复制此链接，打开Dou音搜索，直接观看视频！
+7.15 01/14 M@J.ic LWm:/ :3pm 她的山河  https://v.douyin.com/o87B1FBQ0_c/ 复制此链接，打开Dou音搜索，直接观看视频！
+4.12 bNw:/ 02/05 :5pm V@y.TY 绣里山河 青山不绕  https://v.douyin.com/kdb8_GKsAfQ/ 复制此链接，打开Dou音搜索，直接观看视频！
+1.23 C@U.lc LWZ:/ 09/07 :0pm 山漆绘华  https://v.douyin.com/k4JZ9AM4gxo/ 复制此链接，打开Dou音搜索，直接观看视频！
+6.69 r@r.eO :3pm 01/23 PXM:/ 藕圆小满  https://v.douyin.com/g2nbsrkYezo/ 复制此链接，打开Dou音搜索，直接观看视频！
+8.41 06/08 mdn:/ :6pm R@X.zT 清宣记古法宣纸兴市井  https://v.douyin.com/GE1YLO91fFE/ 复制此链接，打开Dou音搜索，直接观看视频！
+7.66 H@v.Sy 07/14 :5pm dan:/ 墨底云履  https://v.douyin.com/ItgUdCeAKIA/ 复制此链接，打开Dou音搜索，直接观看视频！
+8.48 12/25 :2pm n@q.RX lpq:/ 琉光映山  https://v.douyin.com/cxpAdLs4uqo/ 复制此链接，打开Dou音搜索，直接观看视频！
+2.53 :3pm k@C.Uy FUL:/ 01/08 麦饴飘香岁岁宁  https://v.douyin.com/EtgzwM2TDBI/ 复制此链接，打开Dou音搜索，直接观看视频！
+6.17 :9pm k@p.DH 06/06 hBt:/ 竹心酿  https://v.douyin.com/pBAeJWAa_Gs/ 复制此链接，打开Dou音搜索，直接观看视频！
+9.94 F@h.BT RKW:/ 04/05 :9pm 乡坊织暖四季安  https://v.douyin.com/0s6z1Sf8HtQ/ 复制此链接，打开Dou音搜索，直接观看视频！
+8.94 IvS:/ :3pm x@s.Rx 10/11 云雾山四时清欢  https://v.douyin.com/6zw8LGa4a1c/ 复制此链接，打开Dou音搜索，直接观看视频！
+0.51 :6pm 11/11 mQK:/ n@Q.XM 溪纸谣  https://v.douyin.com/L3J8yTOv1wo/ 复制此链接，打开Dou音搜索，直接观看视频！
+0.23 v@S.lP 10/02 :6pm god:/ 纸素辞  https://v.douyin.com/xtcdmwaZxgo/ 复制此链接，打开Dou音搜索，直接观看视频！
+8.79 Z@m.DU AGi:/ 12/25 :4pm 抟砂筑梦  https://v.douyin.com/6MTx55j7nnY/ 复制此链接，打开Dou音搜索，直接观看视频！
+9.74 06/22 :6pm q@E.hO cnq:/ 糖坊甜事  https://v.douyin.com/MFAI-PYlcE8/ 复制此链接，打开Dou音搜索，直接观看视频！
+5.64 mQx:/ S@Y.MW :7pm 02/15 山果酿  https://v.douyin.com/GEZPzJOiw3k/ 复制此链接，打开Dou音搜索，直接观看视频！
+6.48 S@L.Wz iCh:/ 07/30 :7pm 灯影匠心  https://v.douyin.com/pY87eZbPRhA/ 复制此链接，打开Dou音搜索，直接观看视频！
+7.64 GVl:/ 09/15 o@q.eO :9pm 云栖伞韵  https://v.douyin.com/d0A0RzZ0grM/ 复制此链接，打开Dou音搜索，直接观看视频！
+8.92 L@j.ca 05/17 Gip:/ :4pm 玉魄知音  https://v.douyin.com/LCo0Ihmg1TE/ 复制此链接，打开Dou音搜索，直接观看视频！
+6.43 vfB:/ P@K.jC :8pm 03/19 樱花香坊  https://v.douyin.com/W-axZAr2omQ/ 复制此链接，打开Dou音搜索，直接观看视频！
+6.69 03/29 v@F.hO RxF:/ :9pm 陶瓮里的春风  https://v.douyin.com/IR5HPZkyGso/ 复制此链接，打开Dou音搜索，直接观看视频！
+7.92 X@m.QX 12/27 :4pm WmD:/ 青木履声  https://v.douyin.com/AVUJf_TbMkw/ 复制此链接，打开Dou音搜索，直接观看视频！
