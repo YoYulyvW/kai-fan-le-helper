@@ -149,7 +149,7 @@ INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 
 
-def _make_key_input(vk, keyup=False):
+def _send_key_event(vk, keyup=False):
     inp = _INPUT()
     inp.type = INPUT_KEYBOARD
     inp.u.ki.wVk = vk
@@ -157,40 +157,26 @@ def _make_key_input(vk, keyup=False):
     inp.u.ki.dwFlags = KEYEVENTF_KEYUP if keyup else 0
     inp.u.ki.time = 0
     inp.u.ki.dwExtraInfo = 0
-    return inp
-
-
-def _send_key_event(vk, keyup=False):
-    inp = _make_key_input(vk, keyup)
     _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
 def _send_ctrl_v():
-    # 一次性提交 Ctrl↓ V↓ V↑ Ctrl↑ 四个事件（原子批次），
-    # 避免分多次发送时被远程/无界鼠标的跨机事件打断，
-    # 导致 Ctrl 丢失、只剩一个 v 弹出输入法。
+    # 优先用 keyboard 库发送（其粘贴在多数环境验证可用）
+    if HAS_KEYBOARD:
+        try:
+            _keyboard.send('ctrl+v')
+            return
+        except Exception:
+            pass
+    # 回退：自研 SendInput
     if _user32 is None:
-        if HAS_KEYBOARD:
-            try:
-                _keyboard.send('ctrl+v')
-            except Exception:
-                pass
         return
     VK_CONTROL = 0x11
     VK_V = 0x56
-    arr = (_INPUT * 4)()
-    arr[0] = _make_key_input(VK_CONTROL, False)
-    arr[1] = _make_key_input(VK_V, False)
-    arr[2] = _make_key_input(VK_V, True)
-    arr[3] = _make_key_input(VK_CONTROL, True)
-    try:
-        _user32.SendInput(4, ctypes.byref(arr), ctypes.sizeof(_INPUT))
-    except Exception:
-        if HAS_KEYBOARD:
-            try:
-                _keyboard.send('ctrl+v')
-            except Exception:
-                pass
+    _send_key_event(VK_CONTROL, False)
+    _send_key_event(VK_V, False)
+    _send_key_event(VK_V, True)
+    _send_key_event(VK_CONTROL, True)
 
 
 class _KeyboardHook(object):
