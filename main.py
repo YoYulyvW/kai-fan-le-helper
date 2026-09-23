@@ -1499,25 +1499,72 @@ class MappingChooser(QWidget):
     item_selected = Signal(str)
 
     def __init__(self, parent=None):
-        # 不用 Qt.Popup：Popup 会独占键盘 grab，导致热键（钩子/消息/轮询）
-        # 在弹窗隐藏后集体失效。改用普通 Tool 窗口 + 失焦自动隐藏。
+        # 关键：远程(ToDesk/效卫投屏)下，弹窗一旦激活就会触发输入重定向，
+        # 破坏键盘钩子，导致后续热键集体失效。因此让弹窗完全不接收焦点，
+        # 出现/消失都不改变前台窗口；键盘输入改由临时钩子路由给搜索框。
         super().__init__(
-            parent, Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
+            parent,
+            Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint |
+            Qt.Tool | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAutoFillBackground(False)
         self.setFixedWidth(WIN_WIDTH)
         self._all = []       # [(title, text)]
+        self._key_remove = None
         self._build()
         self.apply_theme()
 
-    def event(self, ev):
-        # 失焦自动隐藏
+    def hideEvent(self, event):
+        self._uninstall_key_hook()
+        super().hideEvent(event)
+
+    def _install_key_hook(self):
+        if not HAS_KEYBOARD:
+            return
         try:
-            if ev.type() == QEvent.WindowDeactivate:
-                self.hide()
+            self._key_remove = _keyboard.on_press(self._on_key, suppress=False)
         except Exception:
-            pass
-        return super().event(ev)
+            self._key_remove = None
+
+    def _uninstall_key_hook(self):
+        if self._key_remove is not None:
+            try:
+                self._key_remove()
+            except Exception:
+                pass
+            self._key_remove = None
+
+    def _on_key(self, e):
+        try:
+            if not self.isVisible():
+                return
+            name = (e.name or '').lower()
+        except Exception:
+            return
+        if name == 'esc':
+            self.hide()
+        elif name == 'enter':
+            self._pick_current()
+        elif name == 'backspace':
+            self.search.setText(self.search.text()[:-1])
+        elif name in ('up', 'down'):
+            self._move_selection(1 if name == 'down' else -1)
+        elif len(name) == 1 and name.isprintable():
+            self.search.setText(self.search.text() + name)
+
+    def _move_selection(self, delta):
+        n = self.list.count()
+        if n <= 0:
+            return
+        r = self.list.currentRow()
+        r = 0 if r < 0 else max(0, min(n - 1, r + delta))
+        self.list.setCurrentRow(r)
+
+    def _pick_current(self):
+        item = self.list.currentItem()
+        if item:
+            self._on_double_click(item)
 
     def _build(self):
         self.container = QWidget(self)
@@ -1562,8 +1609,8 @@ class MappingChooser(QWidget):
         self.apply_theme()
         super().showEvent(event)
         self.raise_()
-        self.activateWindow()
-        self.search.setFocus()
+        # 不 activateWindow / 不 setFocus：避免远程输入重定向破坏键盘钩子
+        self._install_key_hook()
 
     def apply_theme(self):
         c = ThemeManager.colors()
@@ -3254,6 +3301,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
