@@ -200,10 +200,9 @@ class _KeyboardHook(object):
             if nCode == 0:
                 kb = ctypes.cast(
                     lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-                # 忽略注入的合成按键（如本程序发出的 Ctrl+V）
-                if int(kb.flags) & 0x10:  # LLKHF_INJECTED
-                    return _user32.CallNextHookEx(
-                        None, nCode, wParam, lParam)
+                # 注意：不过滤注入事件，否则远程桌面(ToDesk/UU)
+                # 在被控端注入的按键会被忽略，导致远程热键失效。
+                # 自身发送的是 Ctrl+V(V=0x56)，不在热键范围，不会误触发。
                 target = VK_MAP.get(self._hotkey_getter())
                 if target is not None and int(kb.vkCode) == target:
                     # 按下和抬起都屏蔽，避免 F1 传给前台程序
