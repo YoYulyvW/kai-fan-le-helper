@@ -2107,7 +2107,13 @@ class MainWindow(QWidget):
         if not text or text == self.last_clipboard:
             return
         self.last_clipboard = text
+        self._ingest_share_text(text)
 
+    def _ingest_share_text(self, text):
+        # 解析抖音分享文本 → 填入推送框 + 历史记录 + 自动推送
+        # 供剪贴板监听和快捷映射共用
+        if not text:
+            return
         if is_noise_clipboard(text):
             return
         if not looks_like_douyin_share(text):
@@ -2427,6 +2433,10 @@ class MainWindow(QWidget):
     def _on_mapping_chosen(self, text):
         target = getattr(self, '_chooser_target_assistant', None)
         prev_hwnd = getattr(self, '_chooser_prev_hwnd', 0)
+
+        # 等效手动复制：解析剧名填入推送框 + 历史 + 自动推送
+        self._ingest_share_text(text)
+
         # 若目标是其它程序，恢复前台窗口后再粘贴
         if target is False and prev_hwnd:
             self._restore_foreground(prev_hwnd)
@@ -3022,6 +3032,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
