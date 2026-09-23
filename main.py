@@ -2463,6 +2463,8 @@ class MainWindow(QWidget):
         parsed = self._ingest_share_text(text)
 
         if target_assistant:
+            # 助手分支不触发粘贴清空，及时复位保留标志
+            self._keep_clipboard_once = False
             if not parsed:
                 self.input.setText(text)
                 self.input.selectAll()
@@ -2475,6 +2477,15 @@ class MainWindow(QWidget):
     def _on_mapping_chosen(self, text):
         target = getattr(self, '_chooser_target_assistant', None)
         prev_hwnd = getattr(self, '_chooser_prev_hwnd', 0)
+
+        # 双击选择后：内容保留在剪贴板（不随粘贴后清空而清除）
+        self._keep_clipboard_once = True
+        try:
+            QApplication.clipboard().setText(text)
+            self.last_clipboard = text
+        except Exception:
+            pass
+
         # 若目标是其它程序，恢复前台窗口后再粘贴
         if target is False and prev_hwnd:
             self._restore_foreground(prev_hwnd)
@@ -2572,6 +2583,10 @@ class MainWindow(QWidget):
         QTimer.singleShot(400, self._clear_clipboard_after_paste)
 
     def _clear_clipboard_after_paste(self):
+        # 快捷映射弹窗选择的内容需要保留在剪贴板
+        if getattr(self, '_keep_clipboard_once', False):
+            self._keep_clipboard_once = False
+            return
         if not self._clear_clipboard:
             return
         try:
@@ -3076,6 +3091,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
