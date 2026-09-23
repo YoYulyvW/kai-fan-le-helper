@@ -23,13 +23,23 @@ from PySide2.QtCore import (
 )
 from PySide2.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QFont, QBrush, QLinearGradient,
-    QFontMetrics
+    QFontMetrics, QKeySequence
 )
 from PySide2.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
     QSystemTrayIcon, QMenu, QAction, QLineEdit, QListWidget, QListWidgetItem,
-    QSizePolicy, QFrame
+    QSizePolicy, QFrame, QShortcut
 )
+
+# ============================================================
+# 全局热键（keyboard 库；未安装时降级为窗口内热键）
+# ============================================================
+try:
+    import keyboard as _keyboard
+    HAS_GLOBAL_HOTKEY = True
+except Exception:
+    _keyboard = None
+    HAS_GLOBAL_HOTKEY = False
 
 # ============================================================
 # 高 DPI 自适应（必须在创建 QApplication 之前设置）
@@ -114,6 +124,9 @@ STATUS_MIN_W = 56
 STATUS_MAX_W = 110
 
 THEME_POLL_INTERVAL = 2000
+
+DEFAULT_HOTKEY = "F1"
+HOTKEY_OPTIONS = [f"F{i}" for i in range(1, 13)]
 
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
@@ -1086,6 +1099,7 @@ class MainWindow(QWidget):
     devices_offline_signal = Signal(list)
     send_result_signal = Signal(str, str, dict)
     broadcast_hit_signal = Signal(str, int)
+    global_hotkey_signal = Signal()
 
     SCALE_OPTIONS = [
         ("自动", 1.0),
@@ -1122,6 +1136,9 @@ class MainWindow(QWidget):
 
         settings = load_settings()
         self._auto_scan = bool(settings.get("auto_scan", True))
+        self._hotkey = str(settings.get("hotkey", DEFAULT_HOTKEY))
+        self._hotkey_enabled = bool(settings.get("hotkey_enabled", True))
+        self._show_name_btn = bool(settings.get("show_name_btn", True))
 
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -1138,12 +1155,14 @@ class MainWindow(QWidget):
         self.devices_offline_signal.connect(self._on_devices_offline)
         self.send_result_signal.connect(self._on_send_result)
         self.broadcast_hit_signal.connect(self._on_broadcast_hit)
+        self.global_hotkey_signal.connect(self._on_global_hotkey)
 
         self.setup_ui()
         self.setup_clipboard()
         self.setup_tray()
         self.setup_panels()
         self.setup_timers()
+        self.setup_hotkey()
 
         self._broadcast_listener = BroadcastListener(BROADCAST_PORT)
         self._broadcast_listener.device_announced.connect(
@@ -1253,6 +1272,7 @@ class MainWindow(QWidget):
         self.name_btn.setFixedSize(sc(28), sc(28))
         self.name_btn.setToolTip("生成名字并复制")
         self.name_btn.clicked.connect(self.generate_and_copy_name)
+        self.name_btn.setVisible(self._show_name_btn)
 
         self.send_btn = QPushButton("发送")
         self.send_btn.setFixedSize(sc(48), sc(28))
@@ -1589,6 +1609,11 @@ class MainWindow(QWidget):
         name_action.triggered.connect(self.generate_and_copy_name)
         menu.addAction(name_action)
 
+        self.name_btn_action = QAction("显示生成名字按钮", self, checkable=True)
+        self.name_btn_action.setChecked(self._show_name_btn)
+        self.name_btn_action.triggered.connect(self._toggle_name_btn)
+        menu.addAction(self.name_btn_action)
+
         menu.addSeparator()
 
         scale_menu = menu.addMenu("缩放")
@@ -1619,6 +1644,26 @@ class MainWindow(QWidget):
         theme_menu.addAction(self.theme_dark_action)
 
         self._update_theme_menu_checks()
+
+        menu.addSeparator()
+
+        hotkey_menu = menu.addMenu("热键")
+
+        self.hotkey_enabled_action = QAction("启用热键", self, checkable=True)
+        self.hotkey_enabled_action.setChecked(self._hotkey_enabled)
+        self.hotkey_enabled_action.triggered.connect(self._toggle_hotkey_enabled)
+        hotkey_menu.addAction(self.hotkey_enabled_action)
+
+        hotkey_menu.addSeparator()
+
+        self._hotkey_actions = {}
+        for key in HOTKEY_OPTIONS:
+            act = QAction(key, self, checkable=True)
+            act.setChecked(key == self._hotkey)
+            act.triggered.connect(
+                lambda checked=False, k=key: self._set_hotkey(k))
+            hotkey_menu.addAction(act)
+            self._hotkey_actions[key] = act
 
         menu.addSeparator()
 
@@ -1672,6 +1717,103 @@ class MainWindow(QWidget):
             pass
         self._flash(f"已复制 {name}", "#34C759")
 
+    # ---------- 热键 ----------
+    def setup_hotkey(self):
+        self._hotkey_handle = None
+        self._hotkey_shortcut = None
+        if not HAS_GLOBAL_HOTKEY:
+            # 未安装 keyboard 时降级为窗口内热键
+            self._hotkey_shortcut = QShortcut(QKeySequence(self._hotkey), self)
+            self._hotkey_shortcut.setContext(Qt.WindowShortcut)
+            self._hotkey_shortcut.activated.connect(self._on_global_hotkey)
+        self._apply_hotkey_enabled()
+
+    def _apply_hotkey_enabled(self):
+        if self._hotkey_enabled:
+            if HAS_GLOBAL_HOTKEY:
+                self._register_global_hotkey()
+            elif self._hotkey_shortcut is not None:
+                self._hotkey_shortcut.setEnabled(True)
+        else:
+            self._unregister_hotkey()
+            if self._hotkey_shortcut is not None:
+                self._hotkey_shortcut.setEnabled(False)
+
+    def _toggle_hotkey_enabled(self, checked):
+        self._hotkey_enabled = bool(checked)
+        settings = load_settings()
+        settings["hotkey_enabled"] = self._hotkey_enabled
+        save_settings(settings)
+        self._apply_hotkey_enabled()
+
+    def _register_global_hotkey(self):
+        if self._hotkey_handle is not None:
+            try:
+                _keyboard.remove_hotkey(self._hotkey_handle)
+            except Exception:
+                pass
+            self._hotkey_handle = None
+        try:
+            self._hotkey_handle = _keyboard.add_hotkey(
+                self._hotkey.lower(), self._emit_global_hotkey)
+        except Exception:
+            self._hotkey_handle = None
+
+    def _unregister_hotkey(self):
+        if self._hotkey_handle is not None:
+            try:
+                _keyboard.remove_hotkey(self._hotkey_handle)
+            except Exception:
+                pass
+            self._hotkey_handle = None
+
+    def _emit_global_hotkey(self):
+        # keyboard 回调运行在后台线程，用信号切回主线程
+        self.global_hotkey_signal.emit()
+
+    def _on_global_hotkey(self):
+        name = generate_name()
+        try:
+            QApplication.clipboard().setText(name)
+            self.last_clipboard = name
+        except Exception:
+            pass
+
+        if self.input.hasFocus():
+            # 输入框聚焦：直接填入
+            self.input.setText(name)
+            self.input.selectAll()
+            self._update_send_btn_state()
+            self._flash(f"已填入 {name}", "#34C759")
+        else:
+            # 未聚焦：仅复制到剪贴板
+            self._flash(f"已复制 {name}", "#34C759")
+
+    def _set_hotkey(self, key):
+        if key == self._hotkey:
+            return
+        self._hotkey = key
+        settings = load_settings()
+        settings["hotkey"] = key
+        save_settings(settings)
+        if HAS_GLOBAL_HOTKEY:
+            self._unregister_hotkey()
+            self._apply_hotkey_enabled()
+        elif self._hotkey_shortcut is not None:
+            self._hotkey_shortcut.setKey(QKeySequence(key))
+        self._update_hotkey_menu_checks()
+
+    def _update_hotkey_menu_checks(self):
+        for k, act in self._hotkey_actions.items():
+            act.setChecked(k == self._hotkey)
+
+    def _toggle_name_btn(self, checked):
+        self._show_name_btn = bool(checked)
+        self.name_btn.setVisible(self._show_name_btn)
+        settings = load_settings()
+        settings["show_name_btn"] = self._show_name_btn
+        save_settings(settings)
+
     def _set_theme(self, mode):
         ThemeManager.mode = mode
         ThemeManager.apply_mode()
@@ -1703,6 +1845,7 @@ class MainWindow(QWidget):
 
     def quit_app(self):
         self._quitting = True
+        self._unregister_hotkey()
         try:
             self._broadcast_listener.stop()
             self._broadcast_listener.wait(1000)
