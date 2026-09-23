@@ -190,6 +190,16 @@ def _release_modifiers():
         _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
+def _clear_stuck_keys():
+    # 补发 V 与所有修饰键的抬起事件，防止跨机(无界鼠标/远程)
+    # 丢失 keyup 导致按键卡住（表现为 vvvvvv 无限输入）
+    if _user32 is None:
+        return
+    for vk in (0x56, 0x11, 0x10, 0x12, 0x5B, 0x5C):
+        inp = _make_key_input(vk, True)
+        _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
 def _send_text_unicode(text):
     # 用 KEYEVENTF_UNICODE 直接注入文本，不依赖 Ctrl/剪贴板，
     # 每个字符 down/up 成对，一次原子提交，彻底避免远程/无界鼠标
@@ -213,13 +223,19 @@ def _send_text_unicode(text):
 
 
 def _send_ctrl_v():
-    # 回退方案：剪贴板 Ctrl+V（原子批次）
+    # 剪贴板 Ctrl+V：首选 keyboard 库发送（用户环境验证远程可用），
+    # 回退到原子批次 SendInput。
+    if HAS_KEYBOARD:
+        try:
+            _release_modifiers()
+            _keyboard.send('ctrl+v')
+            time.sleep(0.06)
+            # 补发抬起，防止跨机丢 keyup 导致 vvvv 卡键
+            _clear_stuck_keys()
+            return
+        except Exception:
+            pass
     if _user32 is None:
-        if HAS_KEYBOARD:
-            try:
-                _keyboard.send('ctrl+v')
-            except Exception:
-                pass
         return
     VK_CONTROL = 0x11
     VK_V = 0x56
@@ -231,12 +247,10 @@ def _send_ctrl_v():
     arr[3] = _make_key_input(VK_CONTROL, True)
     try:
         _user32.SendInput(4, ctypes.byref(arr), ctypes.sizeof(_INPUT))
+        time.sleep(0.06)
+        _clear_stuck_keys()
     except Exception:
-        if HAS_KEYBOARD:
-            try:
-                _keyboard.send('ctrl+v')
-            except Exception:
-                pass
+        pass
 
 
 class _KeyboardHook(object):
@@ -2170,9 +2184,8 @@ class MainWindow(QWidget):
             # 在独立线程发送，避免主线程键盘钩子上下文干扰注入
             def worker():
                 try:
-                    # 优先用 Unicode 直接注入文本（不依赖 Ctrl/剪贴板）
-                    if not _send_text_unicode(name):
-                        _send_ctrl_v()
+                    # 用剪贴板 + Ctrl+V（远程/无界鼠标下文本传输可靠）
+                    _send_ctrl_v()
                 except Exception:
                     pass
             threading.Thread(target=worker, daemon=True).start()
