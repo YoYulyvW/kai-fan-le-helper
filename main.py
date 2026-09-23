@@ -34,7 +34,10 @@ from PySide2.QtWidgets import (
 )
 
 # ============================================================
-# 全局热键（Win32 RegisterHotKey，兼容 Win7，不依赖第三方库）
+# 全局热键（Win32 低级键盘钩子 WH_KEYBOARD_LL）
+# - 兼容 Win7
+# - 不依赖第三方库
+# - 可捕获远程桌面（ToDesk / UU 等）场景下的按键
 # ============================================================
 import ctypes
 from ctypes import wintypes
@@ -46,11 +49,28 @@ except Exception:
     _user32 = None
     HAS_GLOBAL_HOTKEY = False
 
-MOD_NOREPEAT = 0x4000
-WM_HOTKEY = 0x0312
-HOTKEY_ID = 0xB001
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+WM_SYSKEYDOWN = 0x0104
 # F1=0x70 ... F12=0x7B
 VK_MAP = {"F%d" % i: 0x6F + i for i in range(1, 13)}
+
+
+class _KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
+
+try:
+    _HOOKPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+except Exception:
+    _HOOKPROC = None
 
 
 def _send_ctrl_v():
@@ -66,32 +86,50 @@ def _send_ctrl_v():
     _user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
 
 
-class _HotkeyEventFilter(QAbstractNativeEventFilter):
-    def __init__(self, callback):
-        super().__init__()
+class _KeyboardHook(object):
+    """低级键盘钩子：可捕获所有按键（含远程桌面），热键值动态读取。"""
+
+    def __init__(self, hotkey_getter, callback):
+        self._hotkey_getter = hotkey_getter
         self._callback = callback
+        self._hook = None
+        self._proc = None
         self._last_ts = 0.0
 
-    def nativeEventFilter(self, eventType, message):
+    def install(self):
+        if _user32 is None or _HOOKPROC is None or self._hook is not None:
+            return
         try:
-            et = bytes(eventType) if eventType is not None else b""
-            # 只处理 windows_generic_MSG，避免同一条消息被
-            # windows_dispatcher_MSG 再触发一次导致重复执行
-            if et != b"windows_generic_MSG":
-                return False
-            msg = ctypes.cast(
-                int(message), ctypes.POINTER(wintypes.MSG)).contents
-            if msg.message != WM_HOTKEY:
-                return False
-            # 时间防抖，300ms 内的重复触发一律忽略
-            now = time.time()
-            if now - self._last_ts < 0.3:
-                return False
-            self._last_ts = now
-            self._callback()
+            self._proc = _HOOKPROC(self._handler)
+            self._hook = _user32.SetWindowsHookExW(
+                WH_KEYBOARD_LL, self._proc, None, 0)
+        except Exception:
+            self._hook = None
+            self._proc = None
+
+    def uninstall(self):
+        if self._hook is not None and _user32 is not None:
+            try:
+                _user32.UnhookWindowsHookEx(self._hook)
+            except Exception:
+                pass
+        self._hook = None
+        self._proc = None
+
+    def _handler(self, nCode, wParam, lParam):
+        try:
+            if nCode == 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                kb = ctypes.cast(
+                    lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
+                target = VK_MAP.get(self._hotkey_getter())
+                if target is not None and int(kb.vkCode) == target:
+                    now = time.time()
+                    if now - self._last_ts >= 0.3:
+                        self._last_ts = now
+                        self._callback()
         except Exception:
             pass
-        return False
+        return _user32.CallNextHookEx(None, nCode, wParam, lParam)
 
 # ============================================================
 # 高 DPI 自适应（必须在创建 QApplication 之前设置）
@@ -1843,13 +1881,11 @@ class MainWindow(QWidget):
 
     # ---------- 热键 ----------
     def setup_hotkey(self):
-        self._hotkey_handle = None
+        self._hotkey_hook = None
         self._hotkey_shortcut = None
-        self._hotkey_filter = None
         if HAS_GLOBAL_HOTKEY:
-            self._hotkey_filter = _HotkeyEventFilter(self._emit_global_hotkey)
-            QApplication.instance().installNativeEventFilter(
-                self._hotkey_filter)
+            self._hotkey_hook = _KeyboardHook(
+                lambda: self._hotkey, self._emit_global_hotkey)
         else:
             # 非 Windows 降级为窗口内热键
             self._hotkey_shortcut = QShortcut(QKeySequence(self._hotkey), self)
@@ -1858,15 +1894,13 @@ class MainWindow(QWidget):
         self._apply_hotkey_enabled()
 
     def _apply_hotkey_enabled(self):
-        if self._hotkey_enabled:
-            if HAS_GLOBAL_HOTKEY:
-                self._register_global_hotkey()
-            elif self._hotkey_shortcut is not None:
-                self._hotkey_shortcut.setEnabled(True)
-        else:
-            self._unregister_hotkey()
-            if self._hotkey_shortcut is not None:
-                self._hotkey_shortcut.setEnabled(False)
+        if self._hotkey_hook is not None:
+            if self._hotkey_enabled:
+                self._hotkey_hook.install()
+            else:
+                self._hotkey_hook.uninstall()
+        elif self._hotkey_shortcut is not None:
+            self._hotkey_shortcut.setEnabled(self._hotkey_enabled)
 
     def _toggle_hotkey_enabled(self, checked):
         self._hotkey_enabled = bool(checked)
@@ -1875,32 +1909,12 @@ class MainWindow(QWidget):
         save_settings(settings)
         self._apply_hotkey_enabled()
 
-    def _register_global_hotkey(self):
-        self._unregister_hotkey()
-        if not HAS_GLOBAL_HOTKEY:
-            return
-        vk = VK_MAP.get(self._hotkey)
-        if vk is None:
-            return
-        try:
-            hwnd = int(self.winId())
-            ok = _user32.RegisterHotKey(hwnd, HOTKEY_ID, MOD_NOREPEAT, vk)
-            if ok:
-                self._hotkey_handle = HOTKEY_ID
-        except Exception:
-            self._hotkey_handle = None
-
     def _unregister_hotkey(self):
-        if self._hotkey_handle is not None and HAS_GLOBAL_HOTKEY:
-            try:
-                _user32.UnregisterHotKey(
-                    int(self.winId()), self._hotkey_handle)
-            except Exception:
-                pass
-        self._hotkey_handle = None
+        if self._hotkey_hook is not None:
+            self._hotkey_hook.uninstall()
 
     def _emit_global_hotkey(self):
-        # 原生事件过滤器在 Qt 主线程被调用，发信号确保在主线程处理
+        # 钩子回调在 Qt 主线程消息循环中被调用，发信号统一处理
         self.global_hotkey_signal.emit()
 
     def _on_global_hotkey(self):
