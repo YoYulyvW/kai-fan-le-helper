@@ -147,6 +147,22 @@ class _INPUT(ctypes.Structure):
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
+
+# MapVirtualKeyW：虚拟键码 → 硬件扫描码
+try:
+    _user32.MapVirtualKeyW.restype = wintypes.UINT
+    _user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+except Exception:
+    pass
+
+
+def _vk_to_scan(vk):
+    # MAPVK_VK_TO_VSC = 0
+    try:
+        return int(_user32.MapVirtualKeyW(vk, 0))
+    except Exception:
+        return 0
 
 
 def _send_key_event(vk, keyup=False):
@@ -160,19 +176,64 @@ def _send_key_event(vk, keyup=False):
     _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
+def _make_scan_input(scan, keyup=False):
+    # 用扫描码 + KEYEVENTF_SCANCODE，兼容严格的 RDP 客户端
+    inp = _INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.u.ki.wVk = 0
+    inp.u.ki.wScan = scan
+    inp.u.ki.dwFlags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if keyup else 0)
+    inp.u.ki.time = 0
+    inp.u.ki.dwExtraInfo = 0
+    return inp
+
+
+def _send_scan_batch(items):
+    # items: [(scan, keyup), ...]，一次性原子提交，避免 RDP 下丢键/错位
+    if _user32 is None or not items:
+        return 0
+    n = len(items)
+    arr = (_INPUT * n)()
+    for i, (scan, keyup) in enumerate(items):
+        arr[i] = _make_scan_input(scan, keyup)
+    try:
+        return int(_user32.SendInput(
+            n, ctypes.byref(arr), ctypes.sizeof(_INPUT)))
+    except Exception:
+        return 0
+
+
 def _send_ctrl_v():
-    # 优先用 keyboard 库发送（其粘贴在多数环境验证可用）
+    VK_CONTROL = 0x11
+    VK_V = 0x56
+
+    # 主路径：扫描码 + 一次原子批次（Ctrl↓ V↓ V↑ Ctrl↑）
+    if _user32 is not None:
+        ctrl = _vk_to_scan(VK_CONTROL)
+        v = _vk_to_scan(VK_V)
+        if ctrl and v:
+            # 批次前微小延迟，等待焦点/剪贴板就绪
+            time.sleep(0.01)
+            items = [
+                (ctrl, False),   # Ctrl down
+                (v, False),      # V down
+                (v, True),       # V up
+                (ctrl, True),    # Ctrl up
+            ]
+            if _send_scan_batch(items) == len(items):
+                return
+
+    # 回退 1：keyboard 库
     if HAS_KEYBOARD:
         try:
             _keyboard.send('ctrl+v')
             return
         except Exception:
             pass
-    # 回退：自研 SendInput
+
+    # 回退 2：VK 码分次发送
     if _user32 is None:
         return
-    VK_CONTROL = 0x11
-    VK_V = 0x56
     _send_key_event(VK_CONTROL, False)
     _send_key_event(VK_V, False)
     _send_key_event(VK_V, True)
