@@ -1805,6 +1805,16 @@ class MainWindow(QWidget):
         # 稍延迟，确保剪贴板就绪、前台窗口稳定
         QTimer.singleShot(40, do_paste)
 
+        # 粘贴完成后清空剪贴板（延迟足够让目标程序读完）
+        QTimer.singleShot(400, self._clear_clipboard_after_paste)
+
+    def _clear_clipboard_after_paste(self):
+        try:
+            QApplication.clipboard().clear()
+            self.last_clipboard = ""
+        except Exception:
+            pass
+
     def _is_window_focused(self):
         # Frameless/Qt.Tool 置顶窗口在 Windows 下通常带 WS_EX_NOACTIVATE，
         # 从不获得系统键盘焦点，Qt 的 hasFocus/isActiveWindow 永远为假。
