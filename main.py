@@ -430,6 +430,9 @@ THEME_POLL_INTERVAL = 2000
 DEFAULT_HOTKEY = "F1"
 HOTKEY_OPTIONS = [f"F{i}" for i in range(1, 13)]
 
+# 快捷映射：按键 → 固定文本
+MAPPING_KEYS = {"F2": "懂车帝", "F3": "易车", "F4": "巨量引擎"}
+
 HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
 )
@@ -1402,6 +1405,7 @@ class MainWindow(QWidget):
     send_result_signal = Signal(str, str, dict)
     broadcast_hit_signal = Signal(str, int)
     global_hotkey_signal = Signal()
+    mapping_hotkey_signal = Signal(str)
 
     SCALE_OPTIONS = [
         ("自动", 1.0),
@@ -1440,6 +1444,8 @@ class MainWindow(QWidget):
         self._auto_scan = bool(settings.get("auto_scan", True))
         self._hotkey = str(settings.get("hotkey", DEFAULT_HOTKEY))
         self._hotkey_enabled = bool(settings.get("hotkey_enabled", True))
+        self._mapping_enabled = bool(settings.get("mapping_enabled", False))
+        self._mapping_handles = {}
         self._show_name_btn = bool(settings.get("show_name_btn", True))
         self._auto_push = bool(settings.get("auto_push", False))
         self._clear_clipboard = bool(settings.get("clear_clipboard", True))
@@ -1465,6 +1471,8 @@ class MainWindow(QWidget):
         self.broadcast_hit_signal.connect(self._on_broadcast_hit)
         self.global_hotkey_signal.connect(
             self._on_global_hotkey, Qt.QueuedConnection)
+        self.mapping_hotkey_signal.connect(
+            self._on_mapping_hotkey, Qt.QueuedConnection)
 
         self.setup_ui()
         self.setup_clipboard()
@@ -2009,6 +2017,12 @@ class MainWindow(QWidget):
         self.hotkey_enabled_action.triggered.connect(self._toggle_hotkey_enabled)
         hotkey_menu.addAction(self.hotkey_enabled_action)
 
+        self.mapping_action = QAction(
+            "启用快捷映射 (F2懂车帝/F3易车/F4巨量引擎)", self, checkable=True)
+        self.mapping_action.setChecked(self._mapping_enabled)
+        self.mapping_action.triggered.connect(self._toggle_mapping_enabled)
+        hotkey_menu.addAction(self.mapping_action)
+
         hotkey_menu.addSeparator()
 
         self._hotkey_actions = {}
@@ -2109,6 +2123,7 @@ class MainWindow(QWidget):
             self._hotkey_shortcut.setContext(Qt.WindowShortcut)
             self._hotkey_shortcut.activated.connect(self._on_global_hotkey)
         self._apply_hotkey_enabled()
+        self._apply_mapping_enabled()
 
     def _apply_hotkey_enabled(self):
         if HAS_KEYBOARD:
@@ -2137,6 +2152,54 @@ class MainWindow(QWidget):
                 pass
         self._kb_handle = None
 
+    def _apply_mapping_enabled(self):
+        # 注销旧的映射
+        for key, handle in list(self._mapping_handles.items()):
+            try:
+                _keyboard.remove_hotkey(handle)
+            except Exception:
+                pass
+        self._mapping_handles = {}
+
+        if not (HAS_KEYBOARD and self._mapping_enabled):
+            return
+
+        for key, text in MAPPING_KEYS.items():
+            # 与主热键冲突时跳过（避免争抢同一按键）
+            if self._hotkey_enabled and key == self._hotkey:
+                continue
+            try:
+                h = _keyboard.add_hotkey(
+                    key.lower(),
+                    (lambda t=text: self.mapping_hotkey_signal.emit(t)),
+                    suppress=True)
+                self._mapping_handles[key] = h
+            except Exception:
+                pass
+
+    def _toggle_mapping_enabled(self, checked):
+        self._mapping_enabled = bool(checked)
+        settings = load_settings()
+        settings["mapping_enabled"] = self._mapping_enabled
+        save_settings(settings)
+        self._apply_mapping_enabled()
+
+    def _on_mapping_hotkey(self, text):
+        try:
+            QApplication.clipboard().setText(text)
+            self.last_clipboard = text
+        except Exception:
+            pass
+
+        if self._is_window_focused():
+            self.input.setText(text)
+            self.input.selectAll()
+            self.input.setFocus()
+            self._update_send_btn_state()
+            self._flash(f"已填入 {text}", "#34C759")
+        else:
+            self._paste_to_foreground(text)
+
     def _toggle_hotkey_enabled(self, checked):
         self._hotkey_enabled = bool(checked)
         settings = load_settings()
@@ -2146,6 +2209,12 @@ class MainWindow(QWidget):
 
     def _unregister_hotkey(self):
         self._unregister_keyboard_hotkey()
+        for handle in list(self._mapping_handles.values()):
+            try:
+                _keyboard.remove_hotkey(handle)
+            except Exception:
+                pass
+        self._mapping_handles = {}
         if self._hotkey_hook is not None:
             self._hotkey_hook.uninstall()
 
@@ -2279,6 +2348,7 @@ class MainWindow(QWidget):
         if HAS_GLOBAL_HOTKEY:
             self._unregister_hotkey()
             self._apply_hotkey_enabled()
+            self._apply_mapping_enabled()
         elif self._hotkey_shortcut is not None:
             self._hotkey_shortcut.setKey(QKeySequence(key))
         self._update_hotkey_menu_checks()
