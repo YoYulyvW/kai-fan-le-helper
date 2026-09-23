@@ -1793,29 +1793,38 @@ class MainWindow(QWidget):
             self._flash(f"已复制 {name}", "#34C759")
 
     def _is_window_focused(self):
-        # Frameless/Qt.Tool 窗口下 Qt 的焦点/激活判断不可靠，
-        # 依次用 焦点、激活、Win32 前台句柄、鼠标位置 判断
-        try:
-            if self.input.hasFocus():
-                return True
-        except Exception:
-            pass
-        try:
-            if self.isActiveWindow():
-                return True
-        except Exception:
-            pass
+        # Frameless/Qt.Tool 置顶窗口在 Windows 下通常带 WS_EX_NOACTIVATE，
+        # 从不获得系统键盘焦点，Qt 的 hasFocus/isActiveWindow 永远为假。
+        # 因此以"鼠标是否在窗口矩形内"为主判据（Win32 像素坐标，最可靠），
+        # 并叠加"前台窗口属于本进程"的判断。
         try:
             import ctypes
-            fg = ctypes.windll.user32.GetForegroundWindow()
-            if fg and fg == int(self.winId()):
-                return True
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+
+            # 1) 鼠标在窗口矩形内
+            hwnd = int(self.winId())
+            pt = wintypes.POINT()
+            rect = wintypes.RECT()
+            if user32.GetCursorPos(ctypes.byref(pt)) and                     user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                if (rect.left <= pt.x <= rect.right and
+                        rect.top <= pt.y <= rect.bottom):
+                    return True
+
+            # 2) 前台窗口属于本进程
+            import os
+            fg = user32.GetForegroundWindow()
+            if fg:
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+                if pid.value == os.getpid():
+                    return True
         except Exception:
             pass
-        # 兜底：窗口可见且鼠标指针位于窗口范围内
+
+        # 3) Qt 焦点兜底
         try:
-            from PySide2.QtGui import QCursor
-            if self.isVisible() and self.geometry().contains(QCursor.pos()):
+            if self.input.hasFocus() or self.isActiveWindow():
                 return True
         except Exception:
             pass
