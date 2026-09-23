@@ -200,6 +200,11 @@ class _KeyboardHook(object):
             if nCode == 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 kb = ctypes.cast(
                     lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
+                # 忽略注入的合成按键（如本程序发出的 Ctrl+V），
+                # 否则会干扰自身注入，导致粘贴失效
+                if int(kb.flags) & 0x10:  # LLKHF_INJECTED
+                    return _user32.CallNextHookEx(
+                        None, nCode, wParam, lParam)
                 target = VK_MAP.get(self._hotkey_getter())
                 if target is not None and int(kb.vkCode) == target:
                     now = time.time()
@@ -1330,7 +1335,8 @@ class MainWindow(QWidget):
         self.devices_offline_signal.connect(self._on_devices_offline)
         self.send_result_signal.connect(self._on_send_result)
         self.broadcast_hit_signal.connect(self._on_broadcast_hit)
-        self.global_hotkey_signal.connect(self._on_global_hotkey)
+        self.global_hotkey_signal.connect(
+            self._on_global_hotkey, Qt.QueuedConnection)
 
         self.setup_ui()
         self.setup_clipboard()
@@ -2022,10 +2028,13 @@ class MainWindow(QWidget):
         self._flash(f"已粘贴 {name}", "#34C759")
 
         def do_paste():
-            try:
-                _send_ctrl_v()
-            except Exception:
-                pass
+            # 在独立线程发送，避免主线程键盘钩子上下文干扰注入
+            def worker():
+                try:
+                    _send_ctrl_v()
+                except Exception:
+                    pass
+            threading.Thread(target=worker, daemon=True).start()
 
         # 稍延迟，确保剪贴板就绪、前台窗口稳定
         QTimer.singleShot(40, do_paste)
