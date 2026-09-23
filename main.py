@@ -1779,26 +1779,74 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        if self.input.hasFocus() or self._window_is_foreground():
-            # 窗口处于前台：直接填入输入框
+        self._log_hotkey_diag()
+
+        if self._is_window_focused():
+            # 窗口聚焦/鼠标在窗口内：直接填入输入框
             self.input.setText(name)
             self.input.selectAll()
             self.input.setFocus()
             self._update_send_btn_state()
             self._flash(f"已填入 {name}", "#34C759")
         else:
-            # 未在前台：仅复制到剪贴板
+            # 未聚焦：仅复制到剪贴板
             self._flash(f"已复制 {name}", "#34C759")
 
-    def _window_is_foreground(self):
-        # Frameless/Qt.Tool 窗口下 Qt 的 isActiveWindow 不可靠，
-        # 直接用 Win32 前台窗口句柄判断
+    def _is_window_focused(self):
+        # Frameless/Qt.Tool 窗口下 Qt 的焦点/激活判断不可靠，
+        # 依次用 焦点、激活、Win32 前台句柄、鼠标位置 判断
+        try:
+            if self.input.hasFocus():
+                return True
+        except Exception:
+            pass
+        try:
+            if self.isActiveWindow():
+                return True
+        except Exception:
+            pass
         try:
             import ctypes
-            hwnd = int(self.winId())
-            return ctypes.windll.user32.GetForegroundWindow() == hwnd
+            fg = ctypes.windll.user32.GetForegroundWindow()
+            if fg and fg == int(self.winId()):
+                return True
         except Exception:
-            return self.isActiveWindow()
+            pass
+        # 兜底：窗口可见且鼠标指针位于窗口范围内
+        try:
+            from PySide2.QtGui import QCursor
+            if self.isVisible() and self.geometry().contains(QCursor.pos()):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _log_hotkey_diag(self):
+        try:
+            import ctypes
+            from PySide2.QtGui import QCursor
+            try:
+                fg = ctypes.windll.user32.GetForegroundWindow()
+            except Exception:
+                fg = 0
+            try:
+                my = int(self.winId())
+            except Exception:
+                my = 0
+            line = (
+                f"hasFocus={self.input.hasFocus()} "
+                f"isActive={self.isActiveWindow()} "
+                f"visible={self.isVisible()} "
+                f"fg={fg} my={my} match={fg == my} "
+                f"cursorIn={self.geometry().contains(QCursor.pos())} "
+                f"focusW={QApplication.focusWidget()}\n"
+            )
+            with open(os.path.join(os.path.expanduser("~"),
+                                   ".kfl_hotkey_diag.txt"),
+                      "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
 
     def _set_hotkey(self, key):
         if key == self._hotkey:
