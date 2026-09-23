@@ -1140,6 +1140,7 @@ class MainWindow(QWidget):
         self._hotkey_enabled = bool(settings.get("hotkey_enabled", True))
         self._show_name_btn = bool(settings.get("show_name_btn", True))
         self._auto_push = bool(settings.get("auto_push", False))
+        self._clear_clipboard = bool(settings.get("clear_clipboard", True))
 
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -1607,6 +1608,11 @@ class MainWindow(QWidget):
         self.auto_push_action.triggered.connect(self._toggle_auto_push)
         menu.addAction(self.auto_push_action)
 
+        self.clear_clip_action = QAction("粘贴后清空剪贴板", self, checkable=True)
+        self.clear_clip_action.setChecked(self._clear_clipboard)
+        self.clear_clip_action.triggered.connect(self._toggle_clear_clipboard)
+        menu.addAction(self.clear_clip_action)
+
         device_action = QAction("选择设备", self)
         device_action.triggered.connect(self._show_device_from_tray)
         menu.addAction(device_action)
@@ -1684,6 +1690,12 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _toggle_clear_clipboard(self, checked):
+        self._clear_clipboard = bool(checked)
+        settings = load_settings()
+        settings["clear_clipboard"] = self._clear_clipboard
+        save_settings(settings)
 
     def _toggle_auto_push(self, checked):
         self._auto_push = bool(checked)
@@ -1825,6 +1837,8 @@ class MainWindow(QWidget):
         QTimer.singleShot(400, self._clear_clipboard_after_paste)
 
     def _clear_clipboard_after_paste(self):
+        if not self._clear_clipboard:
+            return
         try:
             QApplication.clipboard().clear()
             self.last_clipboard = ""
