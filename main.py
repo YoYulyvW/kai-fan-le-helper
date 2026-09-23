@@ -10,6 +10,7 @@
 import sys
 import os
 import re
+import time
 import json
 import random
 import socket
@@ -69,15 +70,25 @@ class _HotkeyEventFilter(QAbstractNativeEventFilter):
     def __init__(self, callback):
         super().__init__()
         self._callback = callback
+        self._last_ts = 0.0
 
     def nativeEventFilter(self, eventType, message):
         try:
             et = bytes(eventType) if eventType is not None else b""
-            if b"windows" in et:
-                msg = ctypes.cast(
-                    int(message), ctypes.POINTER(wintypes.MSG)).contents
-                if msg.message == WM_HOTKEY:
-                    self._callback()
+            # 只处理 windows_generic_MSG，避免同一条消息被
+            # windows_dispatcher_MSG 再触发一次导致重复执行
+            if et != b"windows_generic_MSG":
+                return False
+            msg = ctypes.cast(
+                int(message), ctypes.POINTER(wintypes.MSG)).contents
+            if msg.message != WM_HOTKEY:
+                return False
+            # 时间防抖，300ms 内的重复触发一律忽略
+            now = time.time()
+            if now - self._last_ts < 0.3:
+                return False
+            self._last_ts = now
+            self._callback()
         except Exception:
             pass
         return False
