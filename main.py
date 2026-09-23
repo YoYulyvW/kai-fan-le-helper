@@ -62,6 +62,9 @@ WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 WM_SYSKEYDOWN = 0x0104
 WM_QUIT = 0x0012
+WM_HOTKEY = 0x0312
+MOD_NOREPEAT = 0x4000
+KEYPOLL_INTERVAL = 60   # ms，按键轮询兜底通道间隔
 # F1=0x70 ... F12=0x7B
 VK_MAP = {"F%d" % i: 0x6F + i for i in range(1, 13)}
 
@@ -81,6 +84,26 @@ try:
         ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 except Exception:
     _HOOKPROC = None
+
+
+class _WinHotkeyFilter(QAbstractNativeEventFilter):
+    # 接收系统 RegisterHotKey 的 WM_HOTKEY 消息，作为键盘钩子之外的第二通道
+    def __init__(self, dispatch):
+        super().__init__()
+        self._dispatch = dispatch
+
+    def nativeEventFilter(self, eventType, message):
+        try:
+            et = bytes(eventType) if eventType is not None else b""
+            if et != b"windows_generic_MSG":
+                return False
+            msg = ctypes.cast(
+                int(message), ctypes.POINTER(wintypes.MSG)).contents
+            if msg.message == WM_HOTKEY:
+                self._dispatch(int(msg.wParam))
+        except Exception:
+            pass
+        return False
 
 # 显式声明签名，确保 64 位下句柄不被截断（跨进程/远程场景必需）
 try:
@@ -1683,6 +1706,13 @@ class MainWindow(QWidget):
         self.mapping_hotkey_signal.connect(
             self._on_mapping_hotkey, Qt.QueuedConnection)
 
+        self._reghotkey_ids = {}
+        self._reghotkey_filter = None
+        self._poll_keys = {}
+        self._poll_down = {}
+        self._last_main_ts = 0.0
+        self._last_map_ts = {}
+
         self.setup_ui()
         self.setup_clipboard()
         self.setup_tray()
@@ -2340,8 +2370,115 @@ class MainWindow(QWidget):
             self._hotkey_shortcut = QShortcut(QKeySequence(self._hotkey), self)
             self._hotkey_shortcut.setContext(Qt.WindowShortcut)
             self._hotkey_shortcut.activated.connect(self._on_global_hotkey)
+        if HAS_GLOBAL_HOTKEY:
+            self._reghotkey_filter = _WinHotkeyFilter(self._on_reghotkey)
+            QApplication.instance().installNativeEventFilter(
+                self._reghotkey_filter)
         self._apply_hotkey_enabled()
         self._apply_mapping_enabled()
+
+    def _register_reghotkeys(self):
+        # 注册系统级热键（第二通道，ToDesk 聚焦时键盘钩子可能收不到）
+        self._unregister_reghotkeys()
+        self._refresh_poll_keys()
+        if not (HAS_GLOBAL_HOTKEY and _user32 is not None):
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            return
+
+        def reg(vk, kind, key):
+            try:
+                if _user32.RegisterHotKey(hwnd, vk, MOD_NOREPEAT, vk):
+                    self._reghotkey_ids[vk] = (kind, key)
+            except Exception:
+                pass
+
+        if self._hotkey_enabled:
+            vk = VK_MAP.get(self._hotkey)
+            if vk:
+                reg(vk, "main", None)
+        if self._mapping_enabled:
+            for key in self._mappings.keys():
+                if key == "F1":
+                    continue
+                if self._hotkey_enabled and key == self._hotkey:
+                    continue
+                vk = VK_MAP.get(key)
+                if not vk or vk in self._reghotkey_ids:
+                    continue
+                reg(vk, "mapping", key)
+
+    def _unregister_reghotkeys(self):
+        if HAS_GLOBAL_HOTKEY and _user32 is not None:
+            try:
+                hwnd = int(self.winId())
+                for vk in list(self._reghotkey_ids.keys()):
+                    try:
+                        _user32.UnregisterHotKey(hwnd, vk)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        self._reghotkey_ids = {}
+
+    def _on_reghotkey(self, hid):
+        entry = self._reghotkey_ids.get(hid)
+        if not entry:
+            return
+        kind, key = entry
+        if kind == "main":
+            self._emit_global_hotkey()
+        elif kind == "mapping" and key:
+            self._emit_mapping_hotkey(key)
+
+    def _refresh_poll_keys(self):
+        # 组装需要轮询的按键：{vk: (kind, key)}
+        pk = {}
+        if self._hotkey_enabled:
+            vk = VK_MAP.get(self._hotkey)
+            if vk:
+                pk[vk] = ("main", None)
+        if self._mapping_enabled:
+            for key in self._mappings.keys():
+                if key == "F1":
+                    continue
+                if self._hotkey_enabled and key == self._hotkey:
+                    continue
+                vk = VK_MAP.get(key)
+                if vk and vk not in pk:
+                    pk[vk] = ("mapping", key)
+        self._poll_keys = pk
+        for vk in list(self._poll_down.keys()):
+            if vk not in pk:
+                self._poll_down.pop(vk, None)
+
+    def _poll_hotkeys(self):
+        # GetAsyncKeyState 最高位表示当前是否按下
+        if _user32 is None or not self._poll_keys:
+            return
+        try:
+            for vk, entry in list(self._poll_keys.items()):
+                down = bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+                was = self._poll_down.get(vk, False)
+                if down and not was:
+                    kind, key = entry
+                    if kind == "main":
+                        self._emit_global_hotkey()
+                    elif key:
+                        self._emit_mapping_hotkey(key)
+                self._poll_down[vk] = down
+        except Exception:
+            pass
+
+    def _emit_mapping_hotkey(self, key):
+        now = time.time()
+        last = self._last_map_ts.get(key, 0.0)
+        if now - last < 0.3:
+            return
+        self._last_map_ts[key] = now
+        self.mapping_hotkey_signal.emit(key)
 
     def _apply_hotkey_enabled(self):
         if HAS_KEYBOARD:
@@ -2361,6 +2498,7 @@ class MainWindow(QWidget):
                 self._hotkey_hook.uninstall()
         elif self._hotkey_shortcut is not None:
             self._hotkey_shortcut.setEnabled(self._hotkey_enabled)
+        self._register_reghotkeys()
 
     def _unregister_keyboard_hotkey(self):
         if self._kb_handle is not None:
@@ -2410,25 +2548,25 @@ class MainWindow(QWidget):
                 pass
         self._mapping_handles = {}
 
-        if not (HAS_KEYBOARD and self._mapping_enabled):
-            return
-
         self._mappings = load_mapping_config()
-        for key in self._mappings.keys():
-            # F1 固定给"生成名字"，配置里忽略
-            if key == "F1":
-                continue
-            # 与主热键冲突时跳过（避免争抢同一按键）
-            if self._hotkey_enabled and key == self._hotkey:
-                continue
-            try:
-                h = _keyboard.add_hotkey(
-                    key.lower(),
-                    (lambda k=key: self.mapping_hotkey_signal.emit(k)),
-                    suppress=True)
-                self._mapping_handles[key] = h
-            except Exception:
-                pass
+
+        if HAS_KEYBOARD and self._mapping_enabled:
+            for key in self._mappings.keys():
+                # F1 固定给"生成名字"，配置里忽略
+                if key == "F1":
+                    continue
+                # 与主热键冲突时跳过（避免争抢同一按键）
+                if self._hotkey_enabled and key == self._hotkey:
+                    continue
+                try:
+                    h = _keyboard.add_hotkey(
+                        key.lower(),
+                        (lambda k=key: self._emit_mapping_hotkey(k)),
+                        suppress=True)
+                    self._mapping_handles[key] = h
+                except Exception:
+                    pass
+        self._register_reghotkeys()
 
     def _toggle_mapping_enabled(self, checked):
         self._mapping_enabled = bool(checked)
@@ -2533,11 +2671,17 @@ class MainWindow(QWidget):
             except Exception:
                 pass
         self._mapping_handles = {}
+        self._unregister_reghotkeys()
         if self._hotkey_hook is not None:
             self._hotkey_hook.uninstall()
 
     def _emit_global_hotkey(self):
-        # 钩子回调在独立线程，发信号统一切回主线程处理
+        # 钩子回调在独立线程，发信号统一切回主线程处理。
+        # 键盘钩子与系统热键两条通道都会触发，这里防重。
+        now = time.time()
+        if now - self._last_main_ts < 0.3:
+            return
+        self._last_main_ts = now
         self.global_hotkey_signal.emit()
 
     def _on_global_hotkey(self):
@@ -2751,6 +2895,11 @@ class MainWindow(QWidget):
         self._theme_poll_timer = QTimer(self)
         self._theme_poll_timer.timeout.connect(self._poll_system_theme)
         self._theme_poll_timer.start(THEME_POLL_INTERVAL)
+
+        # 第三通道：轮询 GetAsyncKeyState（兜底 ToDesk-Win7/效卫投屏等极端场景）
+        self._keypoll_timer = QTimer(self)
+        self._keypoll_timer.timeout.connect(self._poll_hotkeys)
+        self._keypoll_timer.start(KEYPOLL_INTERVAL)
 
         # 热键看门狗：防止 ToDesk 等场景下监听线程静默死亡/钩子被移除
         self._watchdog_ticks = 0
@@ -3091,6 +3240,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
 
 
 
