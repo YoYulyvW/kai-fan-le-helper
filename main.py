@@ -1139,6 +1139,7 @@ class MainWindow(QWidget):
         self._hotkey = str(settings.get("hotkey", DEFAULT_HOTKEY))
         self._hotkey_enabled = bool(settings.get("hotkey_enabled", True))
         self._show_name_btn = bool(settings.get("show_name_btn", True))
+        self._auto_push = bool(settings.get("auto_push", False))
 
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -1577,6 +1578,10 @@ class MainWindow(QWidget):
             if self._auto_scan and not self.current_ip and not self._discovering:
                 self._trigger_immediate_scan()
 
+            # 已连接手机时自动推送
+            if self._auto_push and self.current_ip:
+                self.on_send()
+
     # ---------- 托盘 ----------
     def setup_tray(self):
         self.tray = QSystemTrayIcon(create_icon(), self)
@@ -1596,6 +1601,11 @@ class MainWindow(QWidget):
         self.auto_scan_action.setChecked(self._auto_scan)
         self.auto_scan_action.triggered.connect(self._toggle_auto_scan)
         menu.addAction(self.auto_scan_action)
+
+        self.auto_push_action = QAction("识别后自动推送", self, checkable=True)
+        self.auto_push_action.setChecked(self._auto_push)
+        self.auto_push_action.triggered.connect(self._toggle_auto_push)
+        menu.addAction(self.auto_push_action)
 
         device_action = QAction("选择设备", self)
         device_action.triggered.connect(self._show_device_from_tray)
@@ -1674,6 +1684,12 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _toggle_auto_push(self, checked):
+        self._auto_push = bool(checked)
+        settings = load_settings()
+        settings["auto_push"] = self._auto_push
+        save_settings(settings)
 
     def _toggle_auto_scan(self, checked):
         self._auto_scan = bool(checked)
