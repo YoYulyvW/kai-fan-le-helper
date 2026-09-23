@@ -64,6 +64,7 @@ WM_SYSKEYDOWN = 0x0104
 WM_QUIT = 0x0012
 WM_HOTKEY = 0x0312
 MOD_NOREPEAT = 0x4000
+KEYPOLL_INTERVAL = 60   # ms，按键轮询兜底通道间隔
 # F1=0x70 ... F12=0x7B
 VK_MAP = {"F%d" % i: 0x6F + i for i in range(1, 13)}
 
@@ -1707,6 +1708,8 @@ class MainWindow(QWidget):
 
         self._reghotkey_ids = {}
         self._reghotkey_filter = None
+        self._poll_keys = {}
+        self._poll_down = {}
         self._last_main_ts = 0.0
         self._last_map_ts = {}
 
@@ -2377,6 +2380,7 @@ class MainWindow(QWidget):
     def _register_reghotkeys(self):
         # 注册系统级热键（第二通道，ToDesk 聚焦时键盘钩子可能收不到）
         self._unregister_reghotkeys()
+        self._refresh_poll_keys()
         if not (HAS_GLOBAL_HOTKEY and _user32 is not None):
             return
         try:
@@ -2428,6 +2432,45 @@ class MainWindow(QWidget):
             self._emit_global_hotkey()
         elif kind == "mapping" and key:
             self._emit_mapping_hotkey(key)
+
+    def _refresh_poll_keys(self):
+        # 组装需要轮询的按键：{vk: (kind, key)}
+        pk = {}
+        if self._hotkey_enabled:
+            vk = VK_MAP.get(self._hotkey)
+            if vk:
+                pk[vk] = ("main", None)
+        if self._mapping_enabled:
+            for key in self._mappings.keys():
+                if key == "F1":
+                    continue
+                if self._hotkey_enabled and key == self._hotkey:
+                    continue
+                vk = VK_MAP.get(key)
+                if vk and vk not in pk:
+                    pk[vk] = ("mapping", key)
+        self._poll_keys = pk
+        for vk in list(self._poll_down.keys()):
+            if vk not in pk:
+                self._poll_down.pop(vk, None)
+
+    def _poll_hotkeys(self):
+        # GetAsyncKeyState 最高位表示当前是否按下
+        if _user32 is None or not self._poll_keys:
+            return
+        try:
+            for vk, entry in list(self._poll_keys.items()):
+                down = bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+                was = self._poll_down.get(vk, False)
+                if down and not was:
+                    kind, key = entry
+                    if kind == "main":
+                        self._emit_global_hotkey()
+                    elif key:
+                        self._emit_mapping_hotkey(key)
+                self._poll_down[vk] = down
+        except Exception:
+            pass
 
     def _emit_mapping_hotkey(self, key):
         now = time.time()
@@ -2853,6 +2896,11 @@ class MainWindow(QWidget):
         self._theme_poll_timer.timeout.connect(self._poll_system_theme)
         self._theme_poll_timer.start(THEME_POLL_INTERVAL)
 
+        # 第三通道：轮询 GetAsyncKeyState（兜底 ToDesk-Win7/效卫投屏等极端场景）
+        self._keypoll_timer = QTimer(self)
+        self._keypoll_timer.timeout.connect(self._poll_hotkeys)
+        self._keypoll_timer.start(KEYPOLL_INTERVAL)
+
         # 热键看门狗：防止 ToDesk 等场景下监听线程静默死亡/钩子被移除
         self._watchdog_ticks = 0
         self._hotkey_watchdog_timer = QTimer(self)
@@ -3192,6 +3240,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
