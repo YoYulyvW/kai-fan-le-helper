@@ -2022,7 +2022,11 @@ class MainWindow(QWidget):
     def setup_hotkey(self):
         self._hotkey_hook = None
         self._hotkey_shortcut = None
-        if HAS_GLOBAL_HOTKEY:
+        self._kb_handle = None
+        if HAS_KEYBOARD:
+            # 优先用 keyboard 库（内部为独立线程+消息循环，兼容远程/无界鼠标）
+            pass
+        elif HAS_GLOBAL_HOTKEY:
             self._hotkey_hook = _KeyboardHook(
                 lambda: self._hotkey, self._emit_global_hotkey)
         else:
@@ -2033,13 +2037,31 @@ class MainWindow(QWidget):
         self._apply_hotkey_enabled()
 
     def _apply_hotkey_enabled(self):
-        if self._hotkey_hook is not None:
+        if HAS_KEYBOARD:
+            self._unregister_keyboard_hotkey()
+            if self._hotkey_enabled:
+                try:
+                    self._kb_handle = _keyboard.add_hotkey(
+                        self._hotkey.lower(),
+                        self._emit_global_hotkey,
+                        suppress=True)
+                except Exception:
+                    self._kb_handle = None
+        elif self._hotkey_hook is not None:
             if self._hotkey_enabled:
                 self._hotkey_hook.install()
             else:
                 self._hotkey_hook.uninstall()
         elif self._hotkey_shortcut is not None:
             self._hotkey_shortcut.setEnabled(self._hotkey_enabled)
+
+    def _unregister_keyboard_hotkey(self):
+        if self._kb_handle is not None:
+            try:
+                _keyboard.remove_hotkey(self._kb_handle)
+            except Exception:
+                pass
+        self._kb_handle = None
 
     def _toggle_hotkey_enabled(self, checked):
         self._hotkey_enabled = bool(checked)
@@ -2049,11 +2071,12 @@ class MainWindow(QWidget):
         self._apply_hotkey_enabled()
 
     def _unregister_hotkey(self):
+        self._unregister_keyboard_hotkey()
         if self._hotkey_hook is not None:
             self._hotkey_hook.uninstall()
 
     def _emit_global_hotkey(self):
-        # 钩子回调在 Qt 主线程消息循环中被调用，发信号统一处理
+        # 钩子回调在独立线程，发信号统一切回主线程处理
         self.global_hotkey_signal.emit()
 
     def _on_global_hotkey(self):
