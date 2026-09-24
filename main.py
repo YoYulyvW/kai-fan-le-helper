@@ -385,6 +385,39 @@ SETTINGS_FILE = os.path.join(
     os.path.expanduser("~"), ".kai_fan_le_helper_settings.json"
 )
 
+# 开机自启动（注册表 HKCU\...\Run）
+AUTOSTART_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_REG_NAME = "KaiFanLeHelper"
+
+
+def _autostart_exe_path():
+    if getattr(sys, 'frozen', False):
+        return sys.executable
+    return os.path.abspath(sys.argv[0])
+
+
+def set_autostart(enable):
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, AUTOSTART_REG_PATH,
+            0, winreg.KEY_SET_VALUE)
+        try:
+            if enable:
+                winreg.SetValueEx(
+                    key, AUTOSTART_REG_NAME, 0, winreg.REG_SZ,
+                    '"%s"' % _autostart_exe_path())
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_REG_NAME)
+                except Exception:
+                    pass
+        finally:
+            winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
+
 
 def load_settings():
     try:
@@ -1692,8 +1725,14 @@ class MainWindow(QWidget):
         self._clear_clipboard = bool(settings.get("clear_clipboard", True))
         self._clipboard_materialize = bool(
             settings.get("clipboard_materialize", False))
+        self._autostart = bool(settings.get("autostart", True))
         self._materializing = False
         self._last_materialized = ""
+        # 首次运行/设置变更时同步开机自启动（默认开启）
+        try:
+            set_autostart(self._autostart)
+        except Exception:
+            pass
 
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -2217,6 +2256,11 @@ class MainWindow(QWidget):
         self.materialize_action.triggered.connect(self._toggle_materialize)
         menu.addAction(self.materialize_action)
 
+        self.autostart_action = QAction("开机自启动", self, checkable=True)
+        self.autostart_action.setChecked(self._autostart)
+        self.autostart_action.triggered.connect(self._toggle_autostart)
+        menu.addAction(self.autostart_action)
+
         device_action = QAction("选择设备", self)
         device_action.triggered.connect(self._show_device_from_tray)
         menu.addAction(device_action)
@@ -2300,6 +2344,15 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _toggle_autostart(self, checked):
+        self._autostart = bool(checked)
+        settings = load_settings()
+        settings["autostart"] = self._autostart
+        save_settings(settings)
+        ok = set_autostart(self._autostart)
+        if self._autostart and not ok:
+            self._flash("自启动设置失败", "#FF3B30")
 
     def _toggle_materialize(self, checked):
         self._clipboard_materialize = bool(checked)
