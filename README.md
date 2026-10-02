@@ -210,9 +210,43 @@
 
 ## 构建
 
-已配置 GitHub Actions，push 到 `main` 后自动构建，产物为 `dist/KaiFanLe-Helper.exe`（附 `.sha256` 校验，且**自动附带 `data/mappings.txt`**）。
+> **推荐用本地构建**：不依赖网络 / CI，不污染本机 Python 环境，可离线重复出包。
 
-- 构建环境：Windows + Python 3.8.10 + PySide2 5.15.2.1 + PyInstaller 5.13.2 + keyboard 0.13.5
+### 本地构建（推荐）
+
+项目内置一套**便携嵌入式 Python 3.8.10 构建环境**，锁定版本、解压即用：
+
+```
+首次（需联网，约 5 分钟）：双击 build_env_setup.bat
+以后（可离线）：        双击 build_local.bat
+```
+
+产物：`dist/KaiFanLe-Helper.exe` + `.sha256` + `dist/data/mappings.txt`
+
+**它做了什么：**
+- `build_env_setup.bat`：下载 Python 3.8.10 embeddable → 配置 `site-packages` → 装 pip 24.3.1 → 用本机 pip 预下载 **cp38/win_amd64 wheels**（含全部传递依赖）→ 离线安装 PySide2 / PyInstaller / keyboard。结果固化在 `build_env/`（已 gitignore），之后完全离线。
+- `build_local.bat`：把项目复制到纯 ASCII 目录 `C:\kflbuild` 构建（**PyInstaller 的 PySide2 hook 无法处理中文路径**，故必须转 ASCII），产物拷回 `dist/`，随后清理临时目录。
+
+**关键版本（不要随意升级）：**
+
+| 组件 | 版本 | 备注 |
+|------|------|------|
+| Python | 3.8.10 | PySide2 5.15 仅支持到 3.8 |
+| pip | **24.3.1** | ≥25 用了 3.9+ 语法，3.8 会崩 |
+| PySide2 | 5.15.2.1 | |
+| PyInstaller | 5.13.2 | |
+| keyboard | 0.13.5 | |
+
+**注意：**
+- 项目路径**含中文**时，`build_local.bat` 会自动转 `C:\kflbuild` 构建；若路径本就纯英文，可删掉脚本里那段复制以加速。
+- `build_env/` 体积约 300MB，不入库；换机/新 clone 后跑一次 `build_env_setup.bat` 即可重建。
+
+### CI 构建（备选，手动触发）
+
+GitHub Actions 已改为**仅手动触发**（不再随 push 自动构建，避免与本地构建产物互相覆盖）。
+在仓库 Actions 页 → 「Build Windows EXE」→ **Run workflow** 可手动出包，产物同样提交到 `dist/`。
+
+- 构建环境：`windows-latest` + Python 3.8.10 + PySide2 5.15.2.1 + PyInstaller 5.13.2 + keyboard 0.13.5
 - 打包模式：`--onefile`（单文件）
 
 ## 注意事项

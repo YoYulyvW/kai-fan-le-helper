@@ -1,11 +1,8 @@
 name: Build Windows EXE
 
+# 现在以「本地构建」为主（见 build_local.bat），CI 仅保留手动触发，
+# 避免与本地构建产物互相覆盖。
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'dist/**'
-      - '**.md'
   workflow_dispatch:
 
 permissions:
