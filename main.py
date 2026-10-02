@@ -19,6 +19,8 @@ import http.client
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+from relay_server import RelayServer, DEFAULT_RELAY_CONFIG
+
 from PySide2.QtCore import (
     Qt, QTimer, QThread, Signal, Slot, QPoint, QProcess,
     QAbstractNativeEventFilter
@@ -1778,12 +1780,47 @@ class MainWindow(QWidget):
             self._on_handshake_received)
         self._handshake_listener.start()
 
+        # 中继服务（内嵌 HTTP，供跨网推送；配置见 settings["relay"]）
+        self._relay_cfg = self._load_relay_config(settings)
+        self._relay_server = RelayServer(
+            self._relay_cfg, logger=lambda m: print(m))
+        if self._relay_cfg.get("enabled"):
+            self._relay_server.start()
+
         ThemeManager.apply_mode()
         self.apply_theme()
 
         self.position_top_right()
         if self._auto_scan:
             QTimer.singleShot(500, lambda: self.start_discovery(silent=False))
+
+    # ---------- 中继 ----------
+    def _load_relay_config(self, settings):
+        cfg = dict(DEFAULT_RELAY_CONFIG)
+        raw = {}
+        try:
+            raw = settings.get("relay") or {}
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    if k in cfg:
+                        cfg[k] = v
+        except Exception:
+            raw = {}
+        # 未显式配置 db_path 时，默认持久化到用户目录，
+        # 保证 helper 重启后离线消息不丢；显式设为 "" 则用纯内存
+        try:
+            if not isinstance(raw, dict) or "db_path" not in raw:
+                cfg["db_path"] = os.path.join(
+                    os.path.expanduser("~"), ".kai_fan_le_helper_relay.db")
+        except Exception:
+            pass
+        return cfg
+
+    def _relay_enabled(self):
+        try:
+            return bool(self._relay_cfg.get("enabled"))
+        except Exception:
+            return False
 
     @property
     def current_device(self):
@@ -2337,6 +2374,19 @@ class MainWindow(QWidget):
 
         menu.addSeparator()
 
+        relay_menu = menu.addMenu("中继服务")
+
+        self.relay_action = QAction("启动中继服务", self, checkable=True)
+        self.relay_action.setChecked(self._relay_enabled())
+        self.relay_action.triggered.connect(self._toggle_relay)
+        relay_menu.addAction(self.relay_action)
+
+        copy_relay_action = QAction("复制中继地址", self)
+        copy_relay_action.triggered.connect(self._copy_relay_url)
+        relay_menu.addAction(copy_relay_action)
+
+        menu.addSeparator()
+
         quit_action = QAction("退出", self)
         quit_action.triggered.connect(self.quit_app)
         menu.addAction(quit_action)
@@ -2344,6 +2394,41 @@ class MainWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    # ---------- 中继服务 ----------
+    def _save_relay_enabled(self, enabled):
+        self._relay_cfg["enabled"] = bool(enabled)
+        settings = load_settings()
+        relay = settings.get("relay")
+        if not isinstance(relay, dict):
+            relay = {}
+        relay["enabled"] = bool(enabled)
+        settings["relay"] = relay
+        save_settings(settings)
+
+    def _toggle_relay(self, checked):
+        enabled = bool(checked)
+        self._save_relay_enabled(enabled)
+        if enabled:
+            ok = self._relay_server.start()
+            if ok:
+                self._flash("中继已启动", "#34C759")
+            else:
+                self._flash("中继启动失败", "#FF3B30")
+                self.relay_action.setChecked(False)
+                self._save_relay_enabled(False)
+        else:
+            self._relay_server.stop()
+            self._flash("中继已停止", "#FF9500")
+
+    def _copy_relay_url(self):
+        url = self._relay_server.public_url() or self._relay_server.local_url()
+        try:
+            QApplication.clipboard().setText(url)
+            self.last_clipboard = url
+        except Exception:
+            pass
+        self._flash("已复制中继地址", "#34C759")
 
     def _toggle_autostart(self, checked):
         self._autostart = bool(checked)
@@ -2954,6 +3039,10 @@ class MainWindow(QWidget):
         try:
             self._handshake_listener.stop()
             self._handshake_listener.wait(1000)
+        except Exception:
+            pass
+        try:
+            self._relay_server.stop()
         except Exception:
             pass
         self.tray.hide()
