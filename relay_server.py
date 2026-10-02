@@ -47,7 +47,7 @@ DEFAULT_RELAY_CONFIG = {
     "enabled": False,
     "port": 8860,
     # 内置默认公网地址（可在 settings.json 的 relay.public_url 覆盖）
-    "public_url": "http://relay.lyvw.top",
+    "public_url": "https://relay.lyvw.top",
     "require_token": True,
     "master_token": "",
     "offline_ttl_hours": 24,
