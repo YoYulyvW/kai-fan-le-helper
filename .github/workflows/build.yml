@@ -44,10 +44,11 @@ jobs:
         run: |
           if (Test-Path dist) { Remove-Item -Recurse -Force dist }
           New-Item -ItemType Directory -Path dist | Out-Null
+          New-Item -ItemType Directory -Path "dist\data" -Force | Out-Null
           Copy-Item -Path "build_output\KaiFanLe-Helper.exe" `
                     -Destination "dist\KaiFanLe-Helper.exe" -Force
           if (Test-Path "mappings.txt") {
-            Copy-Item -Path "mappings.txt" -Destination "dist\mappings.txt" -Force
+            Copy-Item -Path "mappings.txt" -Destination "dist\data\mappings.txt" -Force
           }
           (Get-FileHash "dist\KaiFanLe-Helper.exe" -Algorithm SHA256).Hash `
             | Out-File -Encoding ASCII "dist\KaiFanLe-Helper.exe.sha256"

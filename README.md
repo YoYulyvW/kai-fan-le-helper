@@ -56,7 +56,7 @@
 
 ### 配置方式
 
-编辑 **exe 同目录**的 `mappings.txt`（首次运行若不存在会自动生成）：
+编辑 **`data/mappings.txt`**（首次运行若不存在会自动生成）：
 
 ```
 # 以 # 开头是注释
@@ -128,7 +128,7 @@
 
 ### 配置项
 
-编辑用户主目录 `.kai_fan_le_helper_settings.json` 的 `relay` 段（修改后重启生效）：
+编辑 **`data/settings.json`** 的 `relay` 段（修改后重启生效）：
 
 ```json
 {
@@ -178,7 +178,7 @@
 
 ### 持久化与端到端加密
 
-- **持久化**：默认把设备注册表与未确认消息落到 `~/.kai_fan_le_helper_relay.db`（SQLite），
+- **持久化**：默认把设备注册表与未确认消息落到 `data/relay.db`（SQLite），
   helper 重启后自动恢复队列（已 ack 的消息不再恢复）。想用纯内存可在配置里把
   `relay.db_path` 显式设为 `""`。
 - **端到端加密**：`/relay/send` 支持 `"e2ee": true`。中继只透传 `payload`（密文）并在消息上
@@ -189,15 +189,20 @@
 
 ## 配置文件与数据
 
+所有程序生成的文件都在 **exe 同目录的 `data/`** 下（日志在 `data/logs/`）。首次运行会把旧版放在用户主目录的文件自动迁移过来。
+
 | 文件 | 位置 | 说明 |
 |------|------|------|
-| `mappings.txt` | exe 同目录 | 快捷映射配置（内容 + 按键） |
-| `.kai_fan_le_helper_settings.json` | 用户主目录 | 各项设置（缩放、热键、开关等） |
-| `.kai_fan_le_helper_history.json` | 用户主目录 | 剧名历史记录 |
+| `data/mappings.txt` | 程序目录 | 快捷映射配置（内容 + 按键） |
+| `data/settings.json` | 程序目录 | 各项设置（缩放、热键、开关等） |
+| `data/history.json` | 程序目录 | 剧名历史记录 |
+| `data/relay.db` | 程序目录 | 中继设备与离线消息（SQLite） |
+| `data/logs/send.log` | 程序目录 | 发送失败诊断日志 |
+| `data/logs/hotkey_diag.log` | 程序目录 | 热键诊断日志 |
 
 ## 构建
 
-已配置 GitHub Actions，push 到 `main` 后自动构建，产物为 `dist/KaiFanLe-Helper.exe`（附 `.sha256` 校验，且**自动附带 `mappings.txt`**）。
+已配置 GitHub Actions，push 到 `main` 后自动构建，产物为 `dist/KaiFanLe-Helper.exe`（附 `.sha256` 校验，且**自动附带 `data/mappings.txt`**）。
 
 - 构建环境：Windows + Python 3.8.10 + PySide2 5.15.2.1 + PyInstaller 5.13.2 + keyboard 0.13.5
 - 打包模式：`--onefile`（单文件）

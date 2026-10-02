@@ -383,9 +383,87 @@ if hasattr(Qt, "AA_UseHighDpiPixmaps"):
 UI_SCALE = 1.0
 SCALE_MULTIPLIER = 1.0
 
-SETTINGS_FILE = os.path.join(
-    os.path.expanduser("~"), ".kai_fan_le_helper_settings.json"
-)
+
+# ============================================================
+# 统一路径管理：所有程序生成的文件放到 <程序目录>/data 下
+#   data/            配置、历史、数据库等
+#   data/logs/       日志
+# 首次运行会把旧的用户主目录文件迁移过来（向后兼容）
+# ============================================================
+def _app_base_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _ensure_dir(path):
+    try:
+        if path and not os.path.isdir(path):
+            os.makedirs(path, exist_ok=True)
+    except Exception:
+        pass
+    return path
+
+
+def _writable_dir(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write_test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+def _data_dir():
+    # 首选 <程序目录>/data；若程序目录只读（如装在 Program Files），
+    # 回退到 <用户主目录>/.kai_fan_le_helper_data
+    primary = os.path.join(_app_base_dir(), "data")
+    if _writable_dir(primary):
+        return primary
+    return _ensure_dir(
+        os.path.join(os.path.expanduser("~"), ".kai_fan_le_helper_data"))
+
+
+def _logs_dir():
+    return _ensure_dir(os.path.join(_data_dir(), "logs"))
+
+
+def _migrate_legacy(new_path, legacy_path):
+    # 旧文件存在且新文件不存在时，迁移（移动）；失败则忽略
+    try:
+        if os.path.exists(new_path):
+            return
+        if legacy_path and os.path.exists(legacy_path):
+            _ensure_dir(os.path.dirname(new_path))
+            import shutil
+            shutil.move(legacy_path, new_path)
+    except Exception:
+        pass
+
+
+def _data_file(name, legacy_name=None):
+    _data_dir()
+    new_path = os.path.join(_data_dir(), name)
+    if legacy_name:
+        _migrate_legacy(
+            new_path, os.path.join(os.path.expanduser("~"), legacy_name))
+    return new_path
+
+
+def _log_file(name, legacy_name=None):
+    _logs_dir()
+    new_path = os.path.join(_logs_dir(), name)
+    if legacy_name:
+        _migrate_legacy(
+            new_path, os.path.join(os.path.expanduser("~"), legacy_name))
+    return new_path
+
+
+SETTINGS_FILE = _data_file(
+    "settings.json", legacy_name=".kai_fan_le_helper_settings.json")
 
 # 开机自启动（注册表 HKCU\...\Run）
 AUTOSTART_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -508,17 +586,22 @@ def _mapping_base_dir():
 
 
 def _mapping_config_path():
-    exe_path = os.path.join(_mapping_base_dir(), MAPPING_FILE_NAME)
-    if os.path.exists(exe_path):
-        return exe_path
-    user_path = os.path.join(os.path.expanduser("~"), "." + MAPPING_FILE_NAME)
-    if os.path.exists(user_path):
-        return user_path
+    data_path = os.path.join(_data_dir(), MAPPING_FILE_NAME)
+    legacy_exe = os.path.join(_app_base_dir(), MAPPING_FILE_NAME)
+    legacy_home = os.path.join(os.path.expanduser("~"), "." + MAPPING_FILE_NAME)
+    if os.path.exists(data_path):
+        return data_path
+    for legacy in (legacy_exe, legacy_home):
+        if os.path.exists(legacy):
+            _migrate_legacy(data_path, legacy)
+            if os.path.exists(data_path):
+                return data_path
+            return legacy
     try:
-        _write_default_mapping(exe_path)
-        return exe_path
+        _write_default_mapping(data_path)
+        return data_path
     except Exception:
-        return user_path
+        return legacy_home
 
 
 def _write_default_mapping(path):
@@ -563,9 +646,8 @@ def load_mapping_config():
         result = dict(DEFAULT_MAPPING)
     return result
 
-HISTORY_FILE = os.path.join(
-    os.path.expanduser("~"), ".kai_fan_le_helper_history.json"
-)
+HISTORY_FILE = _data_file(
+    "history.json", legacy_name=".kai_fan_le_helper_history.json")
 
 CONN_ERROR_KEYWORDS = [
     "connection", "refused", "timed out", "timeout",
@@ -1806,12 +1888,12 @@ class MainWindow(QWidget):
                         cfg[k] = v
         except Exception:
             raw = {}
-        # 未显式配置 db_path 时，默认持久化到用户目录，
-        # 保证 helper 重启后离线消息不丢；显式设为 "" 则用纯内存
+        # 未显式配置 db_path 时，默认持久化到 <程序目录>/data/relay.db，
+        # 保证 helper 重启后离线消息不丢；显式设为 "" 则用纯内存。
+        # 注意：不迁移旧库（离线队列属易失数据，设备会重新注册）。
         try:
             if not isinstance(raw, dict) or "db_path" not in raw:
-                cfg["db_path"] = os.path.join(
-                    os.path.expanduser("~"), ".kai_fan_le_helper_relay.db")
+                cfg["db_path"] = os.path.join(_data_dir(), "relay.db")
         except Exception:
             pass
         return cfg
@@ -2966,8 +3048,8 @@ class MainWindow(QWidget):
                 f"cursorIn={self.geometry().contains(QCursor.pos())} "
                 f"focusW={QApplication.focusWidget()}\n"
             )
-            with open(os.path.join(os.path.expanduser("~"),
-                                   ".kfl_hotkey_diag.txt"),
+            with open(_log_file("hotkey_diag.log",
+                                 legacy_name=".kfl_hotkey_diag.txt"),
                       "a", encoding="utf-8") as f:
                 f.write(line)
         except Exception:
@@ -3353,8 +3435,8 @@ class MainWindow(QWidget):
 
         # 记录失败详情，便于诊断
         try:
-            log_path = os.path.join(
-                os.path.expanduser("~"), ".kfl_send_log.txt")
+            log_path = _log_file(
+                "send.log", legacy_name=".kfl_send_log.txt")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write("%s\tip=%s\ttext=%r\tresult=%r\n" % (
                     datetime.now().isoformat(), ip, sent_text, result))
