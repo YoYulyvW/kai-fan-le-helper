@@ -165,9 +165,17 @@
 | POST | `/relay/send` | 是 | 发送消息（在线直投 / 离线入队） |
 | GET | `/relay/poll?timeout=25` | 是 | 长轮询拉取 |
 | POST | `/relay/ack` | 是 | 确认收到 |
-| GET | `/relay/devices` | 是 | 设备列表 |
+| POST | `/relay/unregister` | 是 | 注销本设备（或指定 deviceId） |
+| GET | `/relay/devices` | 是 | 设备列表（含 `online` 字段） |
 | GET | `/relay/health` | 否 | 健康检查 |
 | WS | `/relay/ws?token=...` | 是 | WebSocket 实时通道 |
+
+### 设备在线判定与清理
+
+- `/relay/devices` 每条设备带 **`online`** 字段：最近 60 秒有活动（poll / ws / 任意带 token 的请求）即为 `true`，否则 `false`
+- 后台每 30 秒清理一次：**无活动超过 120 秒**的设备自动删除（防止崩溃 / 断网后永久残留）
+- 设备可主动注销：`POST /relay/unregister`（Header 带自己的 relayToken 即可；带 `master_token` 时可指定 `{"deviceId": "..."}` 删除任意设备）
+- 两个阈值可在配置里调：`relay.device_ttl_sec`（默认 120）
 
 ### 实时通道（WebSocket）
 
@@ -184,8 +192,8 @@
 - **端到端加密**：`/relay/send` 支持 `"e2ee": true`。中继只透传 `payload`（密文）并在消息上
   标注 `e2ee: true`，不做任何解密；加解密由两端 App 自行完成。
 
-> 详细协议与数据模型见 `docs/RELAY_SERVER.md`。当前实现覆盖 P0 + P4 + P5；
-> 剩余可选增强：投递失败自动重试、设备配对二维码（见文档第六节）。
+> 详细协议与数据模型见 `docs/RELAY_SERVER.md`。当前实现覆盖 P0 + P4 + P5 + 投递失败自动重试 + 设备在线判定/清理；
+> 剩余可选增强：设备配对二维码（见文档第六节）。
 
 ## 配置文件与数据
 

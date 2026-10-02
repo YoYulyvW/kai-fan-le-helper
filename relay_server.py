@@ -57,6 +57,7 @@ DEFAULT_RELAY_CONFIG = {
     "ws_enabled": True,     # 是否开放 /relay/ws
     "retry_max": 3,         # 投递未确认的最大重试次数（超过则丢弃；0=不重试）
     "retry_interval_sec": 30,  # 投递后多久未 ack 视为失败并重试（秒）
+    "device_ttl_sec": 120,  # 设备无活动超过此时长则清理（秒）
 }
 
 MAX_BODY_BYTES = 256 * 1024      # 单请求体积上限
@@ -68,6 +69,8 @@ REGISTER_RATE = (3, 60)          # 同 deviceId 60s 内最多注册 3 次
 SEND_RATE = (30, 60)             # 单设备 60s 内最多发 30 条
 DEFAULT_TTL_HOURS = 24
 RETRY_SWEEP_INTERVAL = 5         # 后台重试扫描间隔（秒）
+DEVICE_TTL_SEC = 120             # 设备无活动超过此时长则清理（秒）
+DEVICE_SWEEP_INTERVAL = 30       # 设备清理扫描间隔（秒）
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_MAX_FRAME = 4 * 1024 * 1024
@@ -353,6 +356,12 @@ class RelayStore(object):
                     row["version"] or "", max_queue,
                     token=row["token"],
                     registered_at=row["registered_at"] or time.time())
+                # 恢复真实 last_seen，否则重启后所有设备会被误判为在线
+                try:
+                    if row["last_seen"]:
+                        dev.last_seen = float(row["last_seen"])
+                except Exception:
+                    pass
                 self._devices[dev.device_id] = dev
                 if dev.token:
                     self._tokens[dev.token] = dev.device_id
@@ -443,6 +452,12 @@ class RelayStore(object):
         except Exception:
             pass
 
+    def _db_delete_device(self, device_id):
+        if not device_id:
+            return
+        self._db_exec("DELETE FROM devices WHERE device_id=?", (device_id,))
+        self._db_exec("DELETE FROM messages WHERE to_id=?", (device_id,))
+
     def _db_delete_messages(self, ids):
         if not ids:
             return
@@ -475,7 +490,12 @@ class RelayStore(object):
             return None
         with self._lock:
             did = self._tokens.get(token)
-            return self._devices.get(did) if did else None
+            dev = self._devices.get(did) if did else None
+        # 任何携带有效 token 的请求都算一次活动，刷新 last_seen，
+        # 避免纯发送方设备（从不 poll）被定期清理误删
+        if dev is not None:
+            dev.last_seen = time.time()
+        return dev
 
     def is_master(self, token):
         mt = (self.cfg.get("master_token") or "").strip()
@@ -485,6 +505,43 @@ class RelayStore(object):
         with self._lock:
             devs = list(self._devices.values())
         return [d.to_dict() for d in devs]
+
+    def remove_device(self, device_id):
+        """注销设备：从内存与数据库移除，并唤醒其上的等待者。"""
+        if not device_id:
+            return False
+        with self._lock:
+            dev = self._devices.pop(device_id, None)
+            if dev is None:
+                return False
+            self._tokens.pop(dev.token, None)
+        try:
+            with dev.cond:
+                sessions = list(dev.ws_sessions)
+                dev.cond.notify_all()
+            for s in sessions:
+                try:
+                    s.wake()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._db_delete_device(device_id)
+        return True
+
+    def _device_sweep(self):
+        """清理长时间无活动的设备（防止崩溃/断网后永久残留）。"""
+        try:
+            ttl = float(self.cfg.get("device_ttl_sec") or DEVICE_TTL_SEC)
+        except Exception:
+            ttl = float(DEVICE_TTL_SEC)
+        now = time.time()
+        with self._lock:
+            stale = [d.device_id for d in self._devices.values()
+                     if not d.ws_sessions and (now - d.last_seen) > ttl]
+        for did in stale:
+            self.remove_device(did)
+        return stale
 
     def stats(self):
         with self._lock:
@@ -655,16 +712,23 @@ class RelayStore(object):
 
     def _retry_loop(self):
         tick = 0
+        dev_tick = 0
         while not self._stopping:
             time.sleep(1.0)
             tick += 1
-            if tick < RETRY_SWEEP_INTERVAL:
-                continue
-            tick = 0
-            try:
-                self._retry_sweep()
-            except Exception:
-                pass
+            dev_tick += 1
+            if tick >= RETRY_SWEEP_INTERVAL:
+                tick = 0
+                try:
+                    self._retry_sweep()
+                except Exception:
+                    pass
+            if dev_tick >= DEVICE_SWEEP_INTERVAL:
+                dev_tick = 0
+                try:
+                    self._device_sweep()
+                except Exception:
+                    pass
 
     def _retry_sweep(self):
         """把投递后长期未 ack 的消息回队重试；超过上限则丢弃。"""
@@ -1040,6 +1104,31 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 body.get("payload") or {}, ttl_hours,
                 e2ee=bool(body.get("e2ee", False)))
             self._send_json(code, resp)
+            return
+
+        if path == "/relay/unregister":
+            token = self._bearer()
+            dev = store.device_by_token(token)
+            master = store.is_master(token)
+            if not master and dev is None:
+                self._unauthorized()
+                return
+            body, err = self._read_json()
+            if err:
+                self._send_json(err, {"ok": False, "error": "bad request"})
+                return
+            target = ""
+            if isinstance(body, dict):
+                target = str(body.get("deviceId") or "").strip()
+            if target and not master and (dev is None or dev.device_id != target):
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            if target:
+                store.remove_device(target)
+            elif dev is not None:
+                store.remove_device(dev.device_id)
+            # 幂等：无论是否存在都返回 ok
+            self._send_json(200, {"ok": True})
             return
 
         if path == "/relay/ack":

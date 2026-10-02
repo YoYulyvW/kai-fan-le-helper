@@ -232,22 +232,45 @@ Authorization: Bearer rt_xxxxxxxxxxxx
   "ok": true,
   "devices": [
     { "deviceId": "uuid-xxxx", "deviceName": "Xiaomi 14",
-      "platform": "android", "online": true, "lastSeen": "..." }
+      "platform": "android", "online": true, "lastSeen": "...", "ws": 0 }
   ]
 }
 ```
 
+- `online`：最近 60 秒有活动（poll / ws / 任意带 token 的请求）为 `true`，否则 `false`
+- `lastSeen`：最后一次活动时间（UTC）
+- `ws`：该设备当前活跃的 WebSocket 会话数
+
 ---
 
-### 4.7 健康检查
+### 4.7 注销设备
+
+```http
+POST /relay/unregister
+Authorization: Bearer rt_xxxxxxxxxxxx
+Content-Type: application/json
+
+{ }
+```
+
+- 不带 body（或空对象）：注销 **token 对应的设备自己**
+- 带 `{"deviceId": "uuid-yyyy"}`：仅当持有 `master_token` 时可注销**任意设备**
+- 幂等：设备不存在也返回 `{"ok": true}`
+
+---
+
+### 4.8 健康检查
 
 ```http
 GET /relay/health
 ```
 
 ```json
-{ "ok": true, "version": "1.0.0", "uptime": 3600, "devices": 3, "queued": 5 }
+{ "ok": true, "version": "1.1.0", "uptime": 3600, "devices": 3,
+  "queued": 5, "inflight": 0, "ws": 0, "db": true, "ws_enabled": true }
 ```
+
+> 设备清理：后台每 30 秒扫描，**无活动超过 `device_ttl_sec`（默认 120 秒）**的设备自动删除。
 
 ---
 
@@ -410,8 +433,9 @@ self._relay_server.start()
 | POST | `/relay/send` | 是 | 发送消息 |
 | GET | `/relay/poll` | 是 | 长轮询拉取 |
 | POST | `/relay/ack` | 是 | 确认收到 |
+| POST | `/relay/unregister` | 是 | 注销本设备（或指定 deviceId） |
 | WS | `/relay/ws` | 是 | 实时通道 |
-| GET | `/relay/devices` | 是 | 设备列表 |
+| GET | `/relay/devices` | 是 | 设备列表（含 `online`） |
 | GET | `/relay/health` | 否 | 健康检查 |
 
 ---
