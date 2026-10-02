@@ -1,5 +1,9 @@
 # 运行时数据（每个部署实例独立生成，不入库）
 /data/
+dist/data/
+dist/*.db
+dist/*.db-wal
+dist/*.db-shm
 __pycache__/
 *.pyc
 build_output/
