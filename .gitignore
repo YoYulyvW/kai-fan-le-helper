@@ -6,5 +6,8 @@ dist/*.db-wal
 dist/*.db-shm
 __pycache__/
 *.pyc
+
+# 本地嵌入式构建环境（体积大，不入库；用 build_env_setup.bat 重建）
+build_env/
 build_output/
 build_temp/
